@@ -131,6 +131,9 @@ class ImageToVideoPipeline(Pipeline):
         else:
             has_nsfw_concept = [None]
 
+        self.print_gpu_memory_usage()
+        torch.cuda.empty_cache()
+        self.print_gpu_memory_usage()
         return self.ldm(image, **kwargs).frames, has_nsfw_concept
 
     def __str__(self) -> str:

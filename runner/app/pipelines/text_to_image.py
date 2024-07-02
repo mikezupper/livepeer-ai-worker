@@ -207,6 +207,10 @@ class TextToImagePipeline(Pipeline):
         else:
             has_nsfw_concept = [None] * len(output.images)
 
+        self.print_gpu_memory_usage()
+        torch.cuda.empty_cache()
+        self.print_gpu_memory_usage()
+
         return output.images, has_nsfw_concept
 
     def __str__(self) -> str:
