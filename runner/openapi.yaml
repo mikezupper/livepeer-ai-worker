@@ -558,8 +558,7 @@ components:
     AudioResponse:
       properties:
         audio:
-          allOf:
-          - $ref: '#/components/schemas/MediaURL'
+          $ref: '#/components/schemas/MediaURL'
           description: The generated audio.
       type: object
       required:
@@ -919,8 +918,7 @@ components:
     HTTPError:
       properties:
         detail:
-          allOf:
-          - $ref: '#/components/schemas/APIError'
+          $ref: '#/components/schemas/APIError'
           description: Detailed error information.
       type: object
       required:
@@ -1014,6 +1012,22 @@ components:
       - text
       title: ImageToTextResponse
       description: Response model for text generation.
+    LLMChoice:
+      properties:
+        delta:
+          $ref: '#/components/schemas/LLMMessage'
+        index:
+          type: integer
+          title: Index
+        finish_reason:
+          type: string
+          title: Finish Reason
+          nullable: true
+      type: object
+      required:
+      - delta
+      - index
+      title: LLMChoice
     LLMMessage:
       properties:
         role:
@@ -1064,9 +1078,11 @@ components:
       title: LLMRequest
     LLMResponse:
       properties:
-        response:
-          type: string
-          title: Response
+        choices:
+          items:
+            $ref: '#/components/schemas/LLMChoice'
+          type: array
+          title: Choices
         tokens_used:
           type: integer
           title: Tokens Used
@@ -1081,7 +1097,7 @@ components:
           title: Created
       type: object
       required:
-      - response
+      - choices
       - tokens_used
       - id
       - model
