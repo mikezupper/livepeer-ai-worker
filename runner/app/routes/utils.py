@@ -77,6 +77,14 @@ class LLMMessage(BaseModel):
     content: str
 
 
+class LLMChoice(BaseModel):
+    delta: LLMMessage
+    index: int
+    finish_reason: str = Field(
+        default=None,
+        nullable=True,
+    )
+
 class LLMRequest(BaseModel):
     messages: List[LLMMessage]
     model: str = ""
@@ -88,7 +96,7 @@ class LLMRequest(BaseModel):
 
 
 class LLMResponse(BaseModel):
-    response: str
+    choices: List[LLMChoice]
     tokens_used: int
     id: str
     model: str
