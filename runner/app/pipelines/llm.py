@@ -11,7 +11,7 @@ from app.pipelines.utils import get_model_dir, get_max_memory
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
 from huggingface_hub import file_download
 from transformers import AutoConfig
-from app.routes.utils import LLMResponse, LLMChoice, LLMMessage
+from app.routes.utils import LLMResponse, LLMChoice, LLMMessage, LLMTokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -228,11 +228,14 @@ class LLMPipeline(Pipeline):
                                     role="assistant",
                                     content=delta
                                 ),
-                                index=0,
-                                finish_reason=None
+                                index=0
                             )
                         ],
-                        tokens_used=total_tokens,
+                        tokens_used=LLMTokenUsage(
+                            input_tokens=input_tokens,
+                            generated_tokens=total_tokens,
+                            total_tokens=input_tokens + total_tokens
+                            ),
                         id=request_id,
                         model=self.model_id,
                         created=int(time.time())
@@ -263,7 +266,11 @@ class LLMPipeline(Pipeline):
                         finish_reason="stop"
                     )
                 ],
-                tokens_used=input_tokens + total_tokens,
+                tokens_used=LLMTokenUsage(
+                            input_tokens=input_tokens,
+                            generated_tokens=total_tokens,
+                            total_tokens=input_tokens + total_tokens
+                        ),
                 id=request_id,
                 model=self.model_id,
                 created=int(time.time())

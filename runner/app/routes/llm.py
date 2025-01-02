@@ -107,11 +107,11 @@ async def llm(
 async def stream_generator(generator):
     try:
         async for chunk in generator:
-            if isinstance(chunk, dict):
-                if "choices" in chunk:
+            if isinstance(chunk, LLMResponse):
+                if len(chunk.choices) > 0:
                     # Regular streaming chunk or final chunk
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                    if chunk["choices"][0].get("finish_reason") == "stop":
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    if chunk.choices[0].finish_reason == "stop":
                         break
         # Signal end of stream
         yield "data: [DONE]\n\n"
