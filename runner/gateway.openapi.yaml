@@ -876,7 +876,7 @@ components:
         finish_reason:
           type: string
           title: Finish Reason
-          nullable: true
+          default: ''
       type: object
       required:
       - delta
@@ -938,8 +938,7 @@ components:
           type: array
           title: Choices
         tokens_used:
-          type: integer
-          title: Tokens Used
+          $ref: '#/components/schemas/LLMTokenUsage'
         id:
           type: string
           title: Id
@@ -957,6 +956,23 @@ components:
       - model
       - created
       title: LLMResponse
+    LLMTokenUsage:
+      properties:
+        prompt_tokens:
+          type: integer
+          title: Prompt Tokens
+        completion_tokens:
+          type: integer
+          title: Completion Tokens
+        total_tokens:
+          type: integer
+          title: Total Tokens
+      type: object
+      required:
+      - prompt_tokens
+      - completion_tokens
+      - total_tokens
+      title: LLMTokenUsage
     LiveVideoToVideoParams:
       properties:
         subscribe_url:
