@@ -397,15 +397,18 @@ func (w *Worker) AudioToText(ctx context.Context, req GenAudioToTextMultipartReq
 func (w *Worker) LLM(ctx context.Context, req GenLLMJSONRequestBody) (interface{}, error) {
 	isStreaming := req.Stream != nil && *req.Stream
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+
 	c, err := w.borrowContainer(ctx, "llm", *req.Model)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if c == nil {
+		cancel()
 		return nil, errors.New("borrowed container is nil")
 	}
 	if c.Client == nil {
+		cancel()
 		return nil, errors.New("container client is nil")
 	}
 
@@ -795,16 +798,14 @@ func (w *Worker) handleStreamingResponse(ctx context.Context, c *RunnerContainer
 						return
 					}
 
-					var streamData LlmStreamChunk
+					var streamData LLMResponse
 					if err := json.Unmarshal([]byte(data), &streamData); err != nil {
 						slog.Error("Error unmarshaling stream data", slog.String("err", err.Error()))
 						continue
 					}
-
-					totalTokens += streamData.TokensUsed
-
+					totalTokens = streamData.TokensUsed.TotalTokens
 					select {
-					case outputChan <- streamData:
+					case outputChan <- LlmStreamChunk{Chunk: data, Done: false, TokensUsed: streamData.TokensUsed.TotalTokens}:
 					case <-ctx.Done():
 						return
 					}
