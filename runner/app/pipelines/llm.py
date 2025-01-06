@@ -232,8 +232,8 @@ class LLMPipeline(Pipeline):
                             )
                         ],
                         tokens_used=LLMTokenUsage(
-                            input_tokens=input_tokens,
-                            generated_tokens=total_tokens,
+                            prompt_tokens=input_tokens,
+                            completion_tokens=total_tokens,
                             total_tokens=input_tokens + total_tokens
                             ),
                         id=request_id,
@@ -267,8 +267,8 @@ class LLMPipeline(Pipeline):
                     )
                 ],
                 tokens_used=LLMTokenUsage(
-                            input_tokens=input_tokens,
-                            generated_tokens=total_tokens,
+                            prompt_tokens=input_tokens,
+                            completion_tokens=total_tokens,
                             total_tokens=input_tokens + total_tokens
                         ),
                 id=request_id,
