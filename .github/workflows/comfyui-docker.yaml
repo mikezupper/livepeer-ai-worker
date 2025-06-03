@@ -6,7 +6,7 @@ on:
       - "runner/docker/Dockerfile.live-*"
       - "runner/app/**"
       - "runner/images/**"
-      - "runner/VERSION
+      - "runner/VERSION"
   push:
     branches:
       - main
