@@ -47,6 +47,7 @@ class StreamDiffusionWrapper:
         seed: int = 2,
         use_safety_checker: bool = False,
         engine_dir: Optional[Union[str, Path]] = "engines",
+        build_engines_if_missing: bool = True,
     ):
         """
         Initializes the StreamDiffusionWrapper.
@@ -151,6 +152,8 @@ class StreamDiffusionWrapper:
 
         self.stream: StreamDiffusion = self._load_model(
             model_id_or_path=model_id_or_path,
+            width=width,
+            height=height,
             lora_dict=lora_dict,
             lcm_lora_id=lcm_lora_id,
             vae_id=vae_id,
@@ -163,6 +166,7 @@ class StreamDiffusionWrapper:
             cfg_type=cfg_type,
             seed=seed,
             engine_dir=engine_dir,
+            build_engines_if_missing=build_engines_if_missing,
         )
 
         if device_ids is not None:
@@ -352,6 +356,8 @@ class StreamDiffusionWrapper:
     def _load_model(
         self,
         model_id_or_path: str,
+        width: int,
+        height: int,
         t_index_list: List[int],
         lora_dict: Optional[Dict[str, float]] = None,
         lcm_lora_id: Optional[str] = None,
@@ -364,6 +370,7 @@ class StreamDiffusionWrapper:
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         seed: int = 2,
         engine_dir: Optional[Union[str, Path]] = "engines",
+        build_engines_if_missing: bool = True,
     ) -> StreamDiffusion:
         """
         Loads the model.
@@ -491,12 +498,14 @@ class StreamDiffusionWrapper:
                     model_id_or_path: str,
                     max_batch_size: int,
                     min_batch_size: int,
+                    width: int,
+                    height: int,
                 ):
                     maybe_path = Path(model_id_or_path)
                     if maybe_path.exists():
-                        return f"{maybe_path.stem}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+                        return f"{maybe_path.stem}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}--width-{width}--height-{height}"
                     else:
-                        return f"{model_id_or_path}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+                        return f"{model_id_or_path}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}--width-{width}--height-{height}"
 
                 engine_dir = Path(engine_dir)
                 unet_path = os.path.join(
@@ -505,6 +514,8 @@ class StreamDiffusionWrapper:
                         model_id_or_path=model_id_or_path,
                         max_batch_size=stream.trt_unet_batch_size,
                         min_batch_size=stream.trt_unet_batch_size,
+                        width=self.width,
+                        height=self.height,
                     ),
                     "unet.engine",
                 )
@@ -518,6 +529,8 @@ class StreamDiffusionWrapper:
                         min_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
+                        width=self.width,
+                        height=self.height,
                     ),
                     "vae_encoder.engine",
                 )
@@ -531,15 +544,41 @@ class StreamDiffusionWrapper:
                         min_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
+                        width=self.width,
+                        height=self.height,
                     ),
                     "vae_decoder.engine",
                 )
 
+                # Check if all required engines exist
+                missing_engines = []
+                if not os.path.exists(unet_path):
+                    missing_engines.append(f"UNet engine: {unet_path}")
+                if not os.path.exists(vae_decoder_path):
+                    missing_engines.append(f"VAE decoder engine: {vae_decoder_path}")
+                if not os.path.exists(vae_encoder_path):
+                    missing_engines.append(f"VAE encoder engine: {vae_encoder_path}")
+                
+                if missing_engines:
+                    if build_engines_if_missing:
+                        print(f"Missing TensorRT engines, building them...")
+                        for engine in missing_engines:
+                            print(f"  - {engine}")
+                    else:
+                        error_msg = f"Required TensorRT engines are missing and build_engines_if_missing=False:\n"
+                        for engine in missing_engines:
+                            error_msg += f"  - {engine}\n"
+                        error_msg += f"\nTo build engines, set build_engines_if_missing=True or run the build script manually."
+                        raise RuntimeError(error_msg)
+
                 if not os.path.exists(unet_path):
                     os.makedirs(os.path.dirname(unet_path), exist_ok=True)
+                    
+                    print(f"Creating UNet model for image size: {self.width}x{self.height}")
+                    
                     unet_model = UNet(
                         fp16=True,
-                        device=stream.device,
+                        device=str(stream.device),
                         max_batch_size=stream.trt_unet_batch_size,
                         min_batch_size=stream.trt_unet_batch_size,
                         embedding_dim=stream.text_encoder.config.hidden_size,
@@ -552,13 +591,17 @@ class StreamDiffusionWrapper:
                         unet_path + ".opt.onnx",
                         unet_path,
                         opt_batch_size=stream.trt_unet_batch_size,
+                        engine_build_options={
+                            'opt_image_height': self.height,
+                            'opt_image_width': self.width,
+                        },
                     )
 
                 if not os.path.exists(vae_decoder_path):
                     os.makedirs(os.path.dirname(vae_decoder_path), exist_ok=True)
                     stream.vae.forward = stream.vae.decode
                     vae_decoder_model = VAE(
-                        device=stream.device,
+                        device=str(stream.device),
                         max_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
@@ -575,6 +618,10 @@ class StreamDiffusionWrapper:
                         opt_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
+                        engine_build_options={
+                            'opt_image_height': self.height,
+                            'opt_image_width': self.width,
+                        },
                     )
                     delattr(stream.vae, "forward")
 
@@ -582,7 +629,7 @@ class StreamDiffusionWrapper:
                     os.makedirs(os.path.dirname(vae_encoder_path), exist_ok=True)
                     vae_encoder = TorchVAEEncoder(stream.vae).to(torch.device("cuda"))
                     vae_encoder_model = VAEEncoder(
-                        device=stream.device,
+                        device=str(stream.device),
                         max_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
@@ -599,6 +646,10 @@ class StreamDiffusionWrapper:
                         opt_batch_size=self.batch_size
                         if self.mode == "txt2img"
                         else stream.frame_bff_size,
+                        engine_build_options={
+                            'opt_image_height': self.height,
+                            'opt_image_width': self.width,
+                        },
                     )
 
                 cuda_stream = cuda.Stream()
@@ -652,14 +703,14 @@ class StreamDiffusionWrapper:
             from diffusers.pipelines.stable_diffusion.safety_checker import (
                 StableDiffusionSafetyChecker,
             )
-            from transformers import CLIPFeatureExtractor
+            from transformers.models.clip import CLIPFeatureExtractor
 
             self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
                 "CompVis/stable-diffusion-safety-checker"
-            ).to(pipe.device)
+            ).to(device=pipe.device)
             self.feature_extractor = CLIPFeatureExtractor.from_pretrained(
                 "openai/clip-vit-base-patch32"
             )
-            self.nsfw_fallback_img = Image.new("RGB", (512, 512), (0, 0, 0))
+            self.nsfw_fallback_img = Image.new("RGB", (self.height, self.width), (0, 0, 0))
 
         return stream

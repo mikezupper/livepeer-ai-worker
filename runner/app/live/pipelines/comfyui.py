@@ -8,7 +8,7 @@ import pathlib
 
 from .interface import Pipeline
 from comfystream.client import ComfyStreamClient
-from trickle import VideoFrame, VideoOutput
+from trickle import VideoFrame, VideoOutput, DEFAULT_WIDTH, DEFAULT_HEIGHT
 
 import logging
 
@@ -25,6 +25,10 @@ class ComfyUIParams(BaseModel):
         extra = "forbid"
 
     prompt: Union[str, dict] = DEFAULT_WORKFLOW_JSON
+
+    # NOTE: Dimensions must be maintained with the workflow dimensions and is shared with other pipelines
+    width: int = DEFAULT_WIDTH
+    height: int = DEFAULT_HEIGHT
 
     @field_validator('prompt')
     @classmethod
@@ -55,6 +59,7 @@ class ComfyUI(Pipeline):
         self.video_incoming_frames: asyncio.Queue[VideoOutput] = asyncio.Queue()
 
     async def initialize(self, **params):
+        """Initialize the ComfyUI pipeline with given parameters."""
         new_params = ComfyUIParams(**params)
         logging.info(f"Initializing ComfyUI Pipeline with prompt: {new_params.prompt}")
         # TODO: currently its a single prompt, but need to support multiple prompts
@@ -63,7 +68,7 @@ class ComfyUI(Pipeline):
 
         # Warm up the pipeline
         dummy_frame = VideoFrame(None, 0, 0)
-        dummy_frame.side_data.input = torch.randn(1, 512, 512, 3)
+        dummy_frame.side_data.input = torch.randn(1, new_params.height, new_params.width, 3)
 
         for _ in range(WARMUP_RUNS):
             self.client.put_video_input(dummy_frame)
@@ -99,6 +104,26 @@ class ComfyUI(Pipeline):
         self.params = new_params
 
     async def stop(self):
-        logging.info("Stopping ComfyUI pipeline")
-        await self.client.cleanup()
-        logging.info("ComfyUI pipeline stopped")
+        try:
+            logging.info("Stopping ComfyUI pipeline")
+            # Wait for the pipeline to stop
+            # Clear the video_incoming_frames queue
+            while not self.video_incoming_frames.empty():
+                try:
+                    self.video_incoming_frames.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            logging.info("Waiting for ComfyUI client to cleanup")
+            await self.client.cleanup()
+            await asyncio.sleep(1)
+            logging.info("ComfyUI client cleanup complete")
+            # Force CUDA cache clear
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()  # Wait for all CUDA operations to complete
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            logging.error(f"Error stopping ComfyUI pipeline: {e}")
+        finally:
+            self.client = None
+            logging.info("ComfyUI pipeline stopped")

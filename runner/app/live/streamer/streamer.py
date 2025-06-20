@@ -3,12 +3,8 @@ import logging
 import os
 import time
 import numpy as np
-from typing import AsyncGenerator, Awaitable
+from typing import AsyncGenerator, Awaitable, Optional
 from asyncio import Lock
-
-import cv2
-from PIL import Image
-
 from .process_guardian import ProcessGuardian, StreamerCallbacks
 from .protocol.protocol import StreamProtocol
 from .status import timestamp_to_ms

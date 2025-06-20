@@ -8,6 +8,7 @@ from StreamDiffusionWrapper import StreamDiffusionWrapper
 
 from .interface import Pipeline
 from trickle import VideoFrame, VideoOutput
+from trickle import DEFAULT_WIDTH, DEFAULT_HEIGHT
 
 
 class StreamDiffusionParams(BaseModel):
@@ -16,11 +17,13 @@ class StreamDiffusionParams(BaseModel):
 
     prompt: str = "talking head, cyberpunk, tron, matrix, ultra-realistic, dark, futuristic, neon, 8k"
     model_id: str = "KBlueLeaf/kohaku-v2.1"
+    width: int = DEFAULT_WIDTH
+    height: int = DEFAULT_HEIGHT
     lora_dict: Optional[Dict[str, float]] = None
     use_lcm_lora: bool = True
     lcm_lora_id: str = "latent-consistency/lcm-lora-sdv1-5"
     num_inference_steps: int = 50
-    t_index_list: Optional[List[int]] = [37, 45, 48]
+    t_index_list: List[int] = [37, 45, 48]
     scale: float = 1.0
     acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt"
     use_denoising_batch: bool = True
@@ -37,6 +40,7 @@ class StreamDiffusion(Pipeline):
         self.pipe: Optional[StreamDiffusionWrapper] = None
         self.first_frame = True
         self.frame_queue: asyncio.Queue[VideoOutput] = asyncio.Queue()
+        self._pipeline_lock = asyncio.Lock()  # Protects pipeline initialization/reinitialization
 
     async def initialize(self, **params):
         logging.info(f"Initializing StreamDiffusion pipeline with params: {params}")
@@ -44,9 +48,10 @@ class StreamDiffusion(Pipeline):
         logging.info("Pipeline initialization complete")
 
     async def put_video_frame(self, frame: VideoFrame, request_id: str):
-        out_tensor = await asyncio.to_thread(self.process_tensor_sync, frame.tensor)
-        output = VideoOutput(frame, request_id).replace_tensor(out_tensor)
-        await self.frame_queue.put(output)
+        async with self._pipeline_lock:
+            out_tensor = await asyncio.to_thread(self.process_tensor_sync, frame.tensor)
+            output = VideoOutput(frame, request_id).replace_tensor(out_tensor)
+            await self.frame_queue.put(output)
 
     def process_tensor_sync(self, img_tensor: torch.Tensor):
         if self.pipe is None:
@@ -74,25 +79,27 @@ class StreamDiffusion(Pipeline):
         return await self.frame_queue.get()
 
     async def update_params(self, **params):
-        new_params = StreamDiffusionParams(**params)
-        if self.pipe is not None:
-            # avoid resetting the pipe if only the prompt changed
-            only_prompt = self.params.model_copy(update={"prompt": new_params.prompt})
-            if new_params == only_prompt:
-                logging.info(f"Updating prompt: {new_params.prompt}")
-                self.pipe.stream.update_prompt(new_params.prompt)
-                self.params = new_params
-                return
+        async with self._pipeline_lock:
+            new_params = StreamDiffusionParams(**params)
+            if self.pipe is not None:
+                # avoid resetting the pipe if only the prompt changed
+                only_prompt = self.params.model_copy(update={"prompt": new_params.prompt})
+                if new_params == only_prompt:
+                    logging.info(f"Updating prompt: {new_params.prompt}")
+                    self.pipe.stream.update_prompt(new_params.prompt)
+                    self.params = new_params
+                    return
 
-        logging.info(f"Resetting diffuser for params change")
+            logging.info(f"Resetting diffuser for params change")
 
-        self.pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
-        self.params = new_params
-        self.first_frame = True
+            self.pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
+            self.params = new_params
+            self.first_frame = True
 
     async def stop(self):
-        logging.info("Stopping StreamDiffusion pipeline")
-        self.pipe = None
+        async with self._pipeline_lock:
+            self.pipe = None
+            self.frame_queue = asyncio.Queue()
 
 
 def load_streamdiffusion_sync(params: StreamDiffusionParams):
@@ -104,8 +111,8 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams):
         lcm_lora_id=params.lcm_lora_id,
         t_index_list=params.t_index_list,
         frame_buffer_size=1,
-        width=512,
-        height=512,
+        width=params.width,
+        height=params.height,
         warmup=10,
         acceleration=params.acceleration,
         do_add_noise=params.do_add_noise,
@@ -114,6 +121,7 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams):
         similar_image_filter_threshold=params.similar_image_filter_threshold,
         use_denoising_batch=params.use_denoising_batch,
         seed=params.seed,
+        build_engines_if_missing=False,
     )
     pipe.prepare(
         prompt=params.prompt,

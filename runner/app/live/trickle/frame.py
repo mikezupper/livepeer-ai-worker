@@ -5,6 +5,9 @@ from typing import List
 import numpy as np
 import torch
 
+DEFAULT_WIDTH = 384
+DEFAULT_HEIGHT = 704
+
 class SideData:
     """
         Base class for side data, needed to keep it consistent with av frame side_data
