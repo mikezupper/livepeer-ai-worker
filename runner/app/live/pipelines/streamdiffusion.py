@@ -4,7 +4,7 @@ from typing import Dict, List, Literal, Optional
 
 import torch
 from pydantic import BaseModel
-from StreamDiffusionWrapper import StreamDiffusionWrapper
+from streamdiffusion import StreamDiffusionWrapper
 
 from .interface import Pipeline
 from trickle import VideoFrame, VideoOutput
@@ -63,6 +63,8 @@ class StreamDiffusion(Pipeline):
         img_tensor = self.pipe.stream.image_processor.denormalize(img_tensor)
         img_tensor = self.pipe.preprocess_image(img_tensor)
 
+        self.pipe.update_control_image_efficient(img_tensor)
+
         if self.first_frame:
             self.first_frame = False
             for _ in range(self.pipe.batch_size):
@@ -72,8 +74,8 @@ class StreamDiffusion(Pipeline):
         if isinstance(out_tensor, list):
             out_tensor = out_tensor[0]
 
-        # The output tensor from the wrapper is (C, H, W), and the encoder expects (1, H, W, C).
-        return out_tensor.permute(1, 2, 0).unsqueeze(0)
+        # The output tensor from the wrapper is (1, C, H, W), and the encoder expects (1, H, W, C).
+        return out_tensor.permute(0, 2, 3, 1)
 
     async def get_processed_video_frame(self) -> VideoOutput:
         return await self.frame_queue.get()
