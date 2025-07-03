@@ -26,15 +26,15 @@ class StreamDiffusionParams(BaseModel):
         extra = "forbid"
 
     # Model configuration
-    model_id: str = "KBlueLeaf/kohaku-v2.1"
+    model_id: str = "stabilityai/sd-turbo"
 
     # Generation parameters
     prompt: str = "an anime render of a girl with purple hair, masterpiece"
     negative_prompt: str = "blurry, low quality, flat, 2d"
-    guidance_scale: float = 1.1
+    guidance_scale: float = 1.0
     delta: float = 0.7
     num_inference_steps: int = 50
-    t_index_list: List[int] = [0, 16, 32]
+    t_index_list: List[int] = [12, 20, 32]
 
     # Image dimensions
     width: int = DEFAULT_WIDTH
@@ -61,17 +61,28 @@ class StreamDiffusionParams(BaseModel):
     # ControlNet settings
     controlnets: Optional[List[ControlNetConfig]] = [
         ControlNetConfig(
-            model_id="lllyasviel/control_v11f1p_sd15_depth",
-            conditioning_scale=0.28,
-            preprocessor="depth_tensorrt",
+            model_id="thibaud/controlnet-sd21-openpose-diffusers",
+            conditioning_scale=0.711,
+            preprocessor="pose_tensorrt",
+            preprocessor_params={
+                "confidence_threshold": 0.5,
+            },
+            enabled=True,
+            control_guidance_start=0.0,
+            control_guidance_end=1.0,
+        ),
+        ControlNetConfig(
+            model_id="thibaud/controlnet-sd21-hed-diffusers",
+            conditioning_scale=0.2,
+            preprocessor="soft_edge",
             preprocessor_params={},
             enabled=True,
             control_guidance_start=0.0,
             control_guidance_end=1.0,
         ),
         ControlNetConfig(
-            model_id="lllyasviel/control_v11p_sd15_canny",
-            conditioning_scale=0.29,
+            model_id="thibaud/controlnet-sd21-canny-diffusers",
+            conditioning_scale=0.2,
             preprocessor="canny",
             preprocessor_params={
                 "low_threshold": 100,
@@ -82,22 +93,19 @@ class StreamDiffusionParams(BaseModel):
             control_guidance_end=1.0,
         ),
         ControlNetConfig(
-            model_id="lllyasviel/control_v11f1e_sd15_tile",
-            conditioning_scale=0.2,
-            preprocessor="passthrough",
+            model_id="thibaud/controlnet-sd21-depth-diffusers",
+            conditioning_scale=0.5,
+            preprocessor="depth_tensorrt",
             preprocessor_params={},
             enabled=True,
             control_guidance_start=0.0,
             control_guidance_end=1.0,
         ),
         ControlNetConfig(
-            model_id="lllyasviel/control_v11p_sd15_lineart",
-            conditioning_scale=0.0,
-            preprocessor="standard_lineart",
-            preprocessor_params={
-                "gaussian_sigma": 6.0,
-                "intensity_threshold": 8
-            },
+            model_id="thibaud/controlnet-sd21-color-diffusers",
+            conditioning_scale=0.2,
+            preprocessor="passthrough",
+            preprocessor_params={},
             enabled=True,
             control_guidance_start=0.0,
             control_guidance_end=1.0,
@@ -176,30 +184,11 @@ class StreamDiffusion(Pipeline):
             self.frame_queue = asyncio.Queue()
 
 
-sd15_keywords = ["sd1.5", "sd15", "stable-diffusion-v1-5", "stable-diffusion-1-5", "kohaku", "dreamshaper"]
-sdturbo_keywords = ["sdturbo", "sd-turbo"]
-sdxl_turbo_keywords = ["sdxl-turbo"]
-
-def _get_pipeline_type_from_model_id(model_id: str) -> Optional[str]:
-    """Determine pipeline type based on model ID"""
-    model_id_lower = model_id.lower()
-
-    if any(keyword in model_id_lower for keyword in sd15_keywords):
-        return "sd1.5"
-    elif any(keyword in model_id_lower for keyword in sdturbo_keywords):
-        return "sdturbo"
-    elif any(keyword in model_id_lower for keyword in sdxl_turbo_keywords):
-        return "sdxlturbo"
-
-    raise ValueError(f"Unknown pipeline type for model ID: {model_id}")
-
-
 def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[Dict[str, Any]]]:
     """Prepare ControlNet configurations for wrapper"""
     if not params.controlnets:
         return None
 
-    pipeline_type = _get_pipeline_type_from_model_id(params.model_id)
     controlnet_configs = []
     for cn_config in params.controlnets:
         if not cn_config.enabled:
@@ -208,32 +197,28 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
         preprocessor_params = (cn_config.preprocessor_params or {}).copy()
 
         # Inject preprocessor-specific parameters
-        if cn_config.preprocessor == "depth_tensorrt":
-            preprocessor_params.update({
-                "engine_path": "./engines/depth-anything/depth_anything_v2_vits.engine",
-                "detect_resolution": 518,
-                "image_resolution": 512
-            })
-        elif cn_config.preprocessor == "canny":
+        if cn_config.preprocessor in ["canny", "hed", "soft_edge", "passthrough"]:
             # no enforced params
             pass
-        elif cn_config.preprocessor == "passthrough":
+        elif cn_config.preprocessor == "depth_tensorrt":
             preprocessor_params.update({
-                "image_width": params.width,
-                "image_height": params.height
+                "engine_path": "./engines/depth-anything/depth_anything_v2_vits.engine",
             })
-        elif cn_config.preprocessor == "standard_lineart":
+        elif cn_config.preprocessor == "pose_tensorrt":
+            confidence_threshold = preprocessor_params.pop("confidence_threshold", 0.5)
+
+            engine_path = f"./engines/pose/yolo_nas_pose_l_{confidence_threshold}.engine"
+            if not os.path.exists(engine_path):
+                raise ValueError(f"Invalid confidence threshold: {confidence_threshold}")
+
             preprocessor_params.update({
-                "detect_resolution": 512,
-                "image_width": params.width,
-                "image_height": params.height
+                "engine_path": engine_path,
             })
         else:
             raise ValueError(f"Unrecognized preprocessor: {cn_config.preprocessor}")
 
         controlnet_config = {
             'model_id': cn_config.model_id,
-            'pipeline_type': pipeline_type,
             'preprocessor': cn_config.preprocessor,
             'conditioning_scale': cn_config.conditioning_scale,
             'enabled': cn_config.enabled,

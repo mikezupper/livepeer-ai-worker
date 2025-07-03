@@ -3,6 +3,7 @@
 # Internal TensorRT engine build script that runs inside the container
 # This script is designed to be executed within the AI runner container environment
 
+set -e
 [ -v DEBUG ] && set -x
 
 # Configuration
@@ -23,6 +24,7 @@ function display_help() {
     echo "  --output-dir DIR        Output directory for TensorRT engines (default: engines)"
     echo "  --controlnets CONTROLNETS Space-separated list of controlnet models"
     echo "  --build-depth-anything  Build Depth-Anything TensorRT engine (requires ONNX model to be downloaded)"
+    echo "  --build-pose            Build YoloNas Pose TensorRT engine (requires ONNX model to be downloaded)"
     echo "  --help                  Display this help message"
 }
 
@@ -30,6 +32,7 @@ function display_help() {
 MODELS_DIR=${HUGGINGFACE_HUB_CACHE:-./models}
 OUTPUT_DIR="./engines"
 BUILD_DEPTH_ANYTHING=false
+BUILD_POSE=false
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -56,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build-depth-anything)
             BUILD_DEPTH_ANYTHING=true
+            shift
+            ;;
+        --build-pose)
+            BUILD_POSE=true
             shift
             ;;
         --help)
@@ -115,6 +122,11 @@ if [ "$BUILD_DEPTH_ANYTHING" = true ]; then
 else
     echo "Depth-Anything: Disabled"
 fi
+if [ "$BUILD_POSE" = true ]; then
+    echo "YoloNas Pose: Enabled"
+else
+    echo "YoloNas Pose: Disabled"
+fi
 echo
 
 total_builds=0
@@ -123,7 +135,7 @@ total_builds=0
 for model in $MODELS; do
     for timestep in $TIMESTEPS; do
         for dim in $DIMENSIONS; do
-            ((total_builds++))
+            total_builds=$((total_builds + 1))
         done
     done
 done
@@ -136,7 +148,7 @@ current_build=0
 for model in $MODELS; do
     for timestep in $TIMESTEPS; do
         for dim in $DIMENSIONS; do
-            ((current_build++))
+            current_build=$((current_build + 1))
 
             # Parse dimensions
             width=${dim%x*}
@@ -173,20 +185,19 @@ function build_depth_anything_engine() {
     echo "Building Depth-Anything TensorRT engine..."
 
     engine_path="$OUTPUT_DIR/depth-anything/depth_anything_v2_vits.engine"
-    mkdir -p $(dirname "$engine_path")
 
+    if [ -f "$engine_path" ]; then
+        echo "Engine already exists at: $engine_path"
+        echo "Skipping build."
+        return 0
+    fi
+    mkdir -p $(dirname "$engine_path")
 
     if [ ! -d "ComfyUI-Depth-Anything-Tensorrt" ]; then
         git clone https://github.com/yuvraj108c/ComfyUI-Depth-Anything-Tensorrt.git \
             && cd ComfyUI-Depth-Anything-Tensorrt \
             && git checkout 1f4c161949b3616516745781fb91444e6443cc25 2>/dev/null \
             && cd ..
-    fi
-
-    if [ -f "$engine_path" ]; then
-        echo "Engine already exists at: $engine_path"
-        echo "Skipping build."
-        return 0
     fi
 
     echo "Locating Depth-Anything ONNX model..."
@@ -213,8 +224,72 @@ function build_depth_anything_engine() {
     echo
 }
 
+# Function to build YoloNas Pose TensorRT engine if requested.
+# TODO: Remove this once streamdiffusion lib can do this automatically for pose ControlNet.
+function build_pose_engine() {
+    echo "Building YoloNas Pose TensorRT engine..."
+
+    engines_dir="$(readlink -f "$OUTPUT_DIR/pose")"
+    mkdir -p "$engines_dir"
+
+    if [ ! -d "ComfyUI-YoloNasPose-Tensorrt" ]; then
+        git clone https://github.com/yuvraj108c/ComfyUI-YoloNasPose-Tensorrt.git \
+            && cd ComfyUI-YoloNasPose-Tensorrt \
+            && git checkout 873de560bb05bf3331e4121f393b83ecc04c324a 2>/dev/null \
+            && $CONDA_PYTHON -m pip install -r requirements.txt \
+            && cd ..
+    fi
+
+    echo "Locating YoloNas Pose ONNX models..."
+    onnx_model_paths=$(find "$MODELS_DIR" -name "yolo_nas_pose_l_*.onnx" 2>/dev/null)
+
+    if [ -z "$onnx_model_paths" ]; then
+        echo "ERROR: YoloNas Pose ONNX model not found"
+        echo "Please ensure the model is downloaded using huggingface-cli"
+        return 1
+    fi
+
+    echo "Found ONNX models at: $onnx_model_paths"
+
+    echo "Building $(echo "$onnx_model_paths" | wc -w) YoloNas Pose TensorRT engines..."
+    cd ComfyUI-YoloNasPose-Tensorrt
+    for onnx_path in $onnx_model_paths; do
+        engine_path="$engines_dir/$(basename "$onnx_path" .onnx).engine"
+
+        if [ -f "$engine_path" ]; then
+            echo "Engine already exists at: $engine_path"
+            echo "Skipping build."
+            continue
+        fi
+
+        # The export_trt.py script expects a hardcoded path to the model, so create a link
+        rm -f "yolo_nas_pose_l.onnx" && ln -sf "$onnx_path" "yolo_nas_pose_l.onnx"
+
+        echo "Calling export_trt.py to build engine: $engine_path"
+        if $CONDA_PYTHON export_trt.py; then
+            if [ -f "yolo_nas_pose_l.engine" ]; then
+                mv "yolo_nas_pose_l.engine" "$engine_path"
+                echo "  ✓ YoloNas Pose TensorRT engine built successfully"
+            else
+                echo "  ✗ Engine file not found in expected location"
+                return 1
+            fi
+        else
+            echo "  ✗ Failed to build YoloNas Pose TensorRT engine"
+            return 1
+        fi
+    done
+
+    cd ..
+    echo
+}
+
 if [ "$BUILD_DEPTH_ANYTHING" = true ]; then
     build_depth_anything_engine || exit 1
+fi
+
+if [ "$BUILD_POSE" = true ]; then
+    build_pose_engine || exit 1
 fi
 
 # Summary
