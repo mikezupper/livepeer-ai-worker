@@ -175,6 +175,7 @@ class StreamDiffusion(Pipeline):
 
             logging.info(f"Resetting diffuser for params change")
 
+            self.pipe = None
             self.pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
             self.params = new_params
             self.first_frame = True
