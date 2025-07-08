@@ -165,68 +165,102 @@ class StreamDiffusion(Pipeline):
         return await self.frame_queue.get()
 
     async def update_params(self, **params):
+        new_params = StreamDiffusionParams(**params)
+        if new_params == self.params:
+            logging.info("No parameters changed")
+            return
+
         async with self._pipeline_lock:
-            new_params = StreamDiffusionParams(**params)
-            if new_params == self.params:
-                logging.info("No parameters changed")
-                return
-
-            if self.pipe is not None:
-                updatable_params = {
-                    'num_inference_steps', 'guidance_scale', 'delta', 't_index_list', 'seed', 'prompt', 'prompt_interpolation_method', 'negative_prompt', 'seed_interpolation_method'
-                }
-
-                only_updatable_changed = True
-                curr_params = self.params.model_dump() if self.params else {}
-                for key, new_value in new_params.model_dump().items():
-                    curr_value = curr_params.get(key, None)
-                    if key not in updatable_params and new_value != curr_value:
-                        only_updatable_changed = False
-                        logging.info(f"Non-updatable parameter changed: {key}")
-                        break
-                    elif key == 't_index_list' and len(new_value) != len(curr_value or []):
-                        only_updatable_changed = False
-                        logging.info(f"Non-updatable parameter changed: length of t_index_list")
-                        break
-
-                if only_updatable_changed:
-                    logging.info("Updating parameters via update_stream_params")
-
-                    update_kwargs = {
-                        k: v for k, v
-                        in new_params.model_dump().items()
-                        if k in updatable_params and v != getattr(self.params, k)
-                    }
-
-                    # Some fields are named/typed differently from our params in the update_stream_params method
-                    if 'prompt' in update_kwargs:
-                        prompt = update_kwargs.pop('prompt')
-                        update_kwargs['prompt_list'] = [(prompt, 1.0)] if isinstance(prompt, str) else prompt
-                    if 'prompt_interpolation_method' in update_kwargs:
-                        update_kwargs['interpolation_method'] = update_kwargs.pop('prompt_interpolation_method')
-                    if 'seed' in update_kwargs:
-                        seed = update_kwargs.pop('seed')
-                        update_kwargs['seed_list'] = [(seed, 1.0)] if isinstance(seed, int) else seed
-
-                    try:
-                        self.pipe.update_stream_params(**update_kwargs)
-                        self.params = new_params
-                        return
-                    except Exception as e:
-                        logging.error(f"Error updating parameters dynamically: {e}")
+            try:
+                if await self._update_params_dynamic(new_params):
+                    return
+            except Exception as e:
+                logging.error(f"Error updating parameters dynamically: {e}")
 
             logging.info(f"Resetting pipeline for params change")
-
             self.pipe = None
             self.pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
             self.params = new_params
             self.first_frame = True
+
+    async def _update_params_dynamic(self, new_params: StreamDiffusionParams):
+        if self.pipe is None:
+            return False
+
+        updatable_params = {
+            'num_inference_steps', 'guidance_scale', 'delta', 't_index_list',
+            'seed', 'prompt', 'prompt_interpolation_method', 'negative_prompt',
+            'seed_interpolation_method', 'controlnets'
+        }
+
+        update_kwargs = {}
+        controlnet_scale_changes: List[Tuple[int, float]] = []
+        curr_params = self.params.model_dump() if self.params else {}
+        for key, new_value in new_params.model_dump().items():
+            curr_value = curr_params.get(key, None)
+            if new_value == curr_value:
+                continue
+            elif key not in updatable_params and new_value != curr_value:
+                logging.info(f"Non-updatable parameter changed: {key}")
+                return False
+            elif key == 't_index_list' and len(new_value) != len(curr_value or []):
+                logging.info(f"Non-updatable parameter changed: length of t_index_list")
+                return False
+            elif key == 'controlnets':
+                updatable, controlnet_scale_changes = _is_controlnet_change_updatable(self.params, new_params)
+                if not updatable:
+                    logging.info(f"Non-updatable parameter changed: controlnets")
+                    return False
+                # do not add controlnets to update_kwargs
+                continue
+
+            # at this point, we know it's an updatable parameter that changed
+            if key == 'prompt':
+                update_kwargs['prompt_list'] = [(new_value, 1.0)] if isinstance(new_value, str) else new_value
+            elif key == 'prompt_interpolation_method':
+                update_kwargs['interpolation_method'] = new_value
+            elif key == 'seed':
+                update_kwargs['seed_list'] = [(new_value, 1.0)] if isinstance(new_value, int) else new_value
+            else:
+                update_kwargs[key] = new_value
+
+        logging.info(f"Updating parameters dynamically update_kwargs={update_kwargs} controlnet_scale_changes={controlnet_scale_changes}")
+
+        if update_kwargs:
+            self.pipe.update_stream_params(**update_kwargs)
+        for i, scale in controlnet_scale_changes:
+            self.pipe.update_controlnet_scale(i, scale)
+
+        self.params = new_params
+        return True
 
     async def stop(self):
         async with self._pipeline_lock:
             self.pipe = None
             self.frame_queue = asyncio.Queue()
 
+
+def _is_controlnet_change_updatable(curr_params: StreamDiffusionParams | None, new_params: StreamDiffusionParams | None) -> Tuple[bool, list[Tuple[int, float]]]:
+    curr = curr_params.controlnets if curr_params and curr_params.controlnets else []
+    new = new_params.controlnets if new_params and new_params.controlnets else []
+
+    if len(new) != len(curr):
+        return False, []
+
+    scale_changes: list[Tuple[int, float]] = []
+    for i, new_cn in enumerate(new):
+        curr_cn = curr[i]
+        if curr_cn == new_cn:
+            continue
+
+        curr_cn_with_new_scale = curr_cn.model_copy(update={'conditioning_scale': new_cn.conditioning_scale})
+        if curr_cn_with_new_scale != new_cn:
+            # more than just the scale changed
+            return False, []
+
+        scale_changes.append((i, new_cn.conditioning_scale))
+
+    return True, scale_changes
 
 def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[Dict[str, Any]]]:
     """Prepare ControlNet configurations for wrapper"""
