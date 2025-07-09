@@ -7,8 +7,8 @@ LABEL maintainer="Yondon Fu <yondon@livepeer.org>"
 # RUN apt-get update -y && apt-get install libXXX -y
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYENV_ROOT=/root/.pyenv \
-    PATH=$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH
+    PYENV_ROOT="/root/.pyenv"
+ENV PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
 
 # Install prerequisites
 RUN apt update && \
@@ -20,10 +20,10 @@ RUN apt update && \
 ARG PYTHON_VERSION=3.11
 ARG PIP_VERSION=23.3.2
 
+SHELL [ "/bin/bash", "-c" ]
+
 # Install pyenv
 RUN curl https://pyenv.run | bash
-
-SHELL [ "/bin/bash", "-c" ]
 
 RUN source /root/.bashrc && \
     pyenv install $PYTHON_VERSION && \
