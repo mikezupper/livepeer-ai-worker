@@ -21,7 +21,11 @@ ARG PYTHON_VERSION=3.11
 ARG PIP_VERSION=23.3.2
 
 # Install pyenv
-RUN curl https://pyenv.run | bash && \
+RUN curl https://pyenv.run | bash
+
+SHELL [ "/bin/bash", "-c" ]
+
+RUN source /root/.bashrc && \
     pyenv install $PYTHON_VERSION && \
     pyenv global $PYTHON_VERSION && \
     pyenv rehash
