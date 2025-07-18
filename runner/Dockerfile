@@ -15,7 +15,7 @@ RUN apt update && \
     apt install -yqq build-essential libssl-dev zlib1g-dev libbz2-dev \
     libreadline-dev libsqlite3-dev wget curl llvm libncurses5-dev libncursesw5-dev \
     xz-utils tk-dev libffi-dev liblzma-dev python3-openssl git \
-    ffmpeg
+    ffmpeg cuda-toolkit-12-8
 
 ARG PYTHON_VERSION=3.11
 ARG PIP_VERSION=23.3.2
