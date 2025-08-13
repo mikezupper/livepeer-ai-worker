@@ -130,8 +130,8 @@ class StreamDiffusionParams(BaseModel):
     @model_validator(mode="after")
     @staticmethod
     def check_t_index_list(model: "StreamDiffusionParams") -> "StreamDiffusionParams":
-        if not (1 <= len(model.t_index_list) <= 4):
-            raise ValueError("t_index_list must have between 1 and 4 elements")
+        if not (model.min_batch_size <= len(model.t_index_list) <= model.max_batch_size):
+            raise ValueError(f"t_index_list must have between {model.min_batch_size} and {model.max_batch_size} elements")
 
         for i, value in enumerate(model.t_index_list):
             if not (0 <= value <= model.num_inference_steps):
@@ -242,9 +242,6 @@ class StreamDiffusion(Pipeline):
             elif key not in updatable_params:
                 logging.info(f"Non-updatable parameter changed: {key}")
                 return False
-            elif key == 't_index_list' and len(new_value) != len(curr_value or []):
-                logging.info(f"Non-updatable parameter changed: length of t_index_list")
-                return False
             elif key == 'controlnets':
                 updatable, controlnet_scale_changes = _is_controlnet_change_updatable(self.params, new_params)
                 if not updatable:
@@ -344,13 +341,15 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
     return controlnet_configs
 
 
-def load_streamdiffusion_sync(params: StreamDiffusionParams, engine_dir = "engines", build_engines_if_missing = False):
+def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1, max_batch_size = 4, engine_dir = "engines", build_engines_if_missing = False):
     # Prepare ControlNet configuration
     controlnet_config = _prepare_controlnet_configs(params)
 
     pipe = StreamDiffusionWrapper(
         model_id_or_path=params.model_id,
         t_index_list=params.t_index_list,
+        min_batch_size=min_batch_size,
+        max_batch_size=max_batch_size,
         lora_dict=params.lora_dict,
         mode="img2img",
         output_type="pt",
