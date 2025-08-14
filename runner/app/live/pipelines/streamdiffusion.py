@@ -266,6 +266,7 @@ class StreamDiffusion(Pipeline):
             self.pipe.update_controlnet_scale(i, scale)
 
         self.params = new_params
+        self.first_frame = True
         return True
 
     async def stop(self):
