@@ -1,159 +1,15 @@
 import os
 import logging
 import asyncio
-from typing import Dict, List, Literal, Optional, Any, Tuple, cast
+from typing import Dict, List, Optional, Any, cast
 
 import torch
-from pydantic import BaseModel, Field, model_validator
 from streamdiffusion import StreamDiffusionWrapper
-from streamdiffusion.controlnet.preprocessors import list_preprocessors
 
 from .interface import Pipeline
 from trickle import VideoFrame, VideoOutput
-from trickle import DEFAULT_WIDTH, DEFAULT_HEIGHT
 
-AVAILABLE_PREPROCESSORS = list_preprocessors()
-
-class ControlNetConfig(BaseModel):
-    """ControlNet configuration model"""
-    model_id: Literal[
-        "thibaud/controlnet-sd21-openpose-diffusers",
-        "thibaud/controlnet-sd21-hed-diffusers",
-        "thibaud/controlnet-sd21-canny-diffusers",
-        "thibaud/controlnet-sd21-depth-diffusers",
-        "thibaud/controlnet-sd21-color-diffusers"
-    ]
-    conditioning_scale: float = 1.0
-    preprocessor: Optional[str] = None
-    preprocessor_params: Optional[Dict[str, Any]] = None
-    enabled: bool = True
-    control_guidance_start: float = 0.0
-    control_guidance_end: float = 1.0
-
-
-class StreamDiffusionParams(BaseModel):
-    class Config:
-        extra = "forbid"
-
-    # Model configuration
-    model_id: Literal[
-        "stabilityai/sd-turbo",
-        "KBlueLeaf/kohaku-v2.1",
-    ] = "stabilityai/sd-turbo"
-
-    # Generation parameters
-    prompt: str | List[Tuple[str, float]] = "an anime render of a girl with purple hair, masterpiece"
-    prompt_interpolation_method: Literal["linear", "slerp"] = "slerp"
-    normalize_prompt_weights: bool = True
-    negative_prompt: str = "blurry, low quality, flat, 2d"
-    guidance_scale: float = 1.0
-    delta: float = 0.7
-    num_inference_steps: int = 50
-    t_index_list: List[int] = [12, 20, 32]
-
-    # Image dimensions
-    width: int = Field(default=DEFAULT_WIDTH, ge=384, le=1024, multiple_of=64)
-    height: int = Field(default=DEFAULT_HEIGHT, ge=384, le=1024, multiple_of=64)
-
-    # LoRA settings
-    lora_dict: Optional[Dict[str, float]] = None
-    use_lcm_lora: bool = True
-    lcm_lora_id: str = "latent-consistency/lcm-lora-sdv1-5"
-
-    # Acceleration settings
-    acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt"
-
-    # Processing settings
-    use_denoising_batch: bool = True
-    do_add_noise: bool = True
-    seed: int | List[Tuple[int, float]] = 789
-    seed_interpolation_method: Literal["linear", "slerp"] = "linear"
-    normalize_seed_weights: bool = True
-
-    # Similar image filter settings
-    enable_similar_image_filter: bool = False
-    similar_image_filter_threshold: float = 0.98
-    similar_image_filter_max_skip_frame: int = 10
-
-    # ControlNet settings
-    controlnets: Optional[List[ControlNetConfig]] = [
-        ControlNetConfig(
-            model_id="thibaud/controlnet-sd21-openpose-diffusers",
-            conditioning_scale=0.711,
-            preprocessor="pose_tensorrt",
-            preprocessor_params={},
-            enabled=True,
-            control_guidance_start=0.0,
-            control_guidance_end=1.0,
-        ),
-        ControlNetConfig(
-            model_id="thibaud/controlnet-sd21-hed-diffusers",
-            conditioning_scale=0.2,
-            preprocessor="soft_edge",
-            preprocessor_params={},
-            enabled=True,
-            control_guidance_start=0.0,
-            control_guidance_end=1.0,
-        ),
-        ControlNetConfig(
-            model_id="thibaud/controlnet-sd21-canny-diffusers",
-            conditioning_scale=0.2,
-            preprocessor="canny",
-            preprocessor_params={
-                "low_threshold": 100,
-                "high_threshold": 200
-            },
-            enabled=True,
-            control_guidance_start=0.0,
-            control_guidance_end=1.0,
-        ),
-        ControlNetConfig(
-            model_id="thibaud/controlnet-sd21-depth-diffusers",
-            conditioning_scale=0.5,
-            preprocessor="depth_tensorrt",
-            preprocessor_params={},
-            enabled=True,
-            control_guidance_start=0.0,
-            control_guidance_end=1.0,
-        ),
-        ControlNetConfig(
-            model_id="thibaud/controlnet-sd21-color-diffusers",
-            conditioning_scale=0.2,
-            preprocessor="passthrough",
-            preprocessor_params={},
-            enabled=True,
-            control_guidance_start=0.0,
-            control_guidance_end=1.0,
-        )
-    ]
-
-    @model_validator(mode="after")
-    @staticmethod
-    def check_t_index_list(model: "StreamDiffusionParams") -> "StreamDiffusionParams":
-        if not (1 <= len(model.t_index_list) <= 4):
-            raise ValueError("t_index_list must have between 1 and 4 elements")
-
-        for i, value in enumerate(model.t_index_list):
-            if not (0 <= value <= model.num_inference_steps):
-                raise ValueError(
-                    f"Each t_index_list value must be between 0 and num_inference_steps ({model.num_inference_steps}). Found {value} at index {i}."
-                )
-
-        for i in range(1, len(model.t_index_list)):
-            curr, prev = model.t_index_list[i], model.t_index_list[i - 1]
-            if curr < prev:
-                raise ValueError(f"t_index_list must be in non-decreasing order. {curr} < {prev}")
-
-        # Check for duplicate controlnet model_ids
-        if model.controlnets:
-            seen_model_ids = set()
-            for cn in model.controlnets:
-                if cn.model_id in seen_model_ids:
-                    raise ValueError(f"Duplicate controlnet model_id: {cn.model_id}")
-                seen_model_ids.add(cn.model_id)
-
-        return model
-
+from .streamdiffusion_params import StreamDiffusionParams, ControlNetConfig
 
 class StreamDiffusion(Pipeline):
     def __init__(self):
@@ -374,8 +230,6 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
             preprocessor_params.update({
                 "engine_path": engine_path,
             })
-        elif cn_config.preprocessor not in AVAILABLE_PREPROCESSORS:
-            raise ValueError(f"Unrecognized preprocessor: '{cn_config.preprocessor}'. Must be one of {AVAILABLE_PREPROCESSORS}")
 
         controlnet_config = {
             'model_id': cn_config.model_id,
