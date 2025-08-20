@@ -19,7 +19,9 @@ class ControlNetConfig(BaseModel):
         "thibaud/controlnet-sd21-hed-diffusers",
         "thibaud/controlnet-sd21-canny-diffusers",
         "thibaud/controlnet-sd21-depth-diffusers",
-        "thibaud/controlnet-sd21-color-diffusers"
+        "thibaud/controlnet-sd21-color-diffusers",
+        "lllyasviel/control_v11f1p_sd15_depth",
+        "lllyasviel/control_v11f1e_sd15_tile",
     ]
     """ControlNet model identifier. Each model provides different types of conditioning:
     - openpose: Human pose estimation for figure control
@@ -63,7 +65,7 @@ class StreamDiffusionParams(BaseModel):
     # Model configuration
     model_id: Literal[
         "stabilityai/sd-turbo",
-        "KBlueLeaf/kohaku-v2.1",
+        "varb15/PerfectPhotonV2.1",
     ] = "stabilityai/sd-turbo"
     """Base U-Net model to use for generation."""
 
