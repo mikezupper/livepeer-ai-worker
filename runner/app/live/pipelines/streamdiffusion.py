@@ -5,6 +5,9 @@ from typing import Dict, List, Optional, Any, cast
 
 import torch
 from streamdiffusion import StreamDiffusionWrapper
+from PIL import Image
+from io import BytesIO
+import aiohttp
 
 from .interface import Pipeline
 from trickle import VideoFrame, VideoOutput
@@ -19,6 +22,8 @@ class StreamDiffusion(Pipeline):
         self.first_frame = True
         self.frame_queue: asyncio.Queue[VideoOutput] = asyncio.Queue()
         self._pipeline_lock = asyncio.Lock()  # Protects pipeline initialization/reinitialization
+        self._cached_style_image_tensor: Optional[torch.Tensor] = None
+        self._cached_style_image_url: Optional[str] = None
 
     async def initialize(self, **params):
         logging.info(f"Initializing StreamDiffusion pipeline with params: {params}")
@@ -67,6 +72,11 @@ class StreamDiffusion(Pipeline):
             logging.info("No parameters changed")
             return
 
+        # Pre-fetch the style image before locking. This raises any errors early (e.g. invalid URL or image) and also
+        # allows us to fetch the style image without blocking inference with the lock.
+        if new_params.ip_adapter_style_image_url and new_params.ip_adapter_style_image_url != self._cached_style_image_url:
+            await self._fetch_style_image(new_params.ip_adapter_style_image_url)
+
         async with self._pipeline_lock:
             try:
                 if await self._update_params_dynamic(new_params):
@@ -84,8 +94,12 @@ class StreamDiffusion(Pipeline):
                 new_params = self.params or StreamDiffusionParams()
                 self.pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
 
+            if new_params.ip_adapter and new_params.ip_adapter.enabled:
+                await self._update_style_image(new_params)
+                # no-op update prompt to cause an IPAdapter reload
+                self.pipe.update_stream_params(prompt_list=self.pipe.stream._param_updater.get_current_prompts())
+
             self.params = new_params
-            self.applied_controlnets = new_params.controlnets
             self.first_frame = True
 
     async def _update_params_dynamic(self, new_params: StreamDiffusionParams):
@@ -96,11 +110,12 @@ class StreamDiffusion(Pipeline):
             'num_inference_steps', 'guidance_scale', 'delta', 't_index_list',
             'prompt', 'prompt_interpolation_method', 'normalize_prompt_weights', 'negative_prompt',
             'seed', 'seed_interpolation_method', 'normalize_seed_weights',
-            'controlnets', # handled separately below
+            'controlnets', 'ip_adapter', 'ip_adapter_style_image_url'
         }
 
         update_kwargs = {}
         curr_params = self.params.model_dump() if self.params else {}
+        changed_ipadapter = False
         for key, new_value in new_params.model_dump().items():
             curr_value = curr_params.get(key, None)
             if new_value == curr_value:
@@ -116,6 +131,17 @@ class StreamDiffusion(Pipeline):
                 update_kwargs['seed_list'] = [(new_value, 1.0)] if isinstance(new_value, int) else new_value
             elif key == 'controlnets':
                 update_kwargs['controlnet_config'] = _prepare_controlnet_configs(new_params)
+            elif key == 'ip_adapter':
+                enabled = new_params.ip_adapter and new_params.ip_adapter.enabled
+                if not enabled and new_value:
+                    # Enabled flag is ignored, so we set scale to 0.0 to disable it.
+                    new_value['scale'] = 0.0
+
+                update_kwargs['ipadapter_config'] = new_value
+                changed_ipadapter = True
+            elif key == 'ip_adapter_style_image_url':
+                # Do not set on update_kwargs, we'll update it separately.
+                changed_ipadapter = True
             else:
                 update_kwargs[key] = new_value
 
@@ -123,10 +149,44 @@ class StreamDiffusion(Pipeline):
 
         if update_kwargs:
             self.pipe.update_stream_params(**update_kwargs)
+        if changed_ipadapter:
+            await self._update_style_image(new_params)
+            # no-op update prompt to cause an IPAdapter reload
+            self.pipe.update_stream_params(prompt_list=self.pipe.stream._param_updater.get_current_prompts())
 
         self.params = new_params
         self.first_frame = True
         return True
+
+    async def _update_style_image(self, params: StreamDiffusionParams) -> None:
+        assert self.pipe is not None
+
+        style_image_url = params.ip_adapter_style_image_url
+        ipadapter_enabled = params.ip_adapter is not None and params.ip_adapter.enabled
+        if not ipadapter_enabled:
+            return
+
+        if style_image_url and style_image_url != self._cached_style_image_url:
+            await self._fetch_style_image(style_image_url)
+
+        if self._cached_style_image_tensor is not None:
+            self.pipe.update_style_image(self._cached_style_image_tensor)
+        else:
+            logging.warning("[IPAdapter] No cached style image tensor; skipping style image update")
+
+    async def _fetch_style_image(self, style_image_url: str):
+        """
+        Pre-fetches the style image and caches it in self._cached_style_image_tensor.
+
+        If the pipe is not initialized, this just validates that the image in the URL is valid and return.
+        """
+        image = await _load_image_from_url(style_image_url)
+        if self.pipe is None:
+            return
+
+        tensor = self.pipe.preprocess_image(image)
+        self._cached_style_image_tensor = tensor
+        self._cached_style_image_url = style_image_url
 
     async def stop(self):
         async with self._pipeline_lock:
@@ -180,6 +240,7 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
 def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1, max_batch_size = 4, engine_dir = "engines", build_engines_if_missing = False):
     # Prepare ControlNet configuration
     controlnet_config = _prepare_controlnet_configs(params)
+    ipadapter_config = params.ip_adapter.model_dump() if params.ip_adapter else None
 
     pipe = StreamDiffusionWrapper(
         model_id_or_path=params.model_id,
@@ -204,8 +265,10 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1,
         seed=params.seed if isinstance(params.seed, int) else params.seed[0][0],
         normalize_seed_weights=params.normalize_seed_weights,
         normalize_prompt_weights=params.normalize_prompt_weights,
-        use_controlnet=bool(controlnet_config),
+        use_controlnet=True,
         controlnet_config=controlnet_config,
+        use_ipadapter=(params.model_id not in ['stabilityai/sd-turbo']),
+        ipadapter_config=ipadapter_config,
         engine_dir=engine_dir,
         build_engines_if_missing=build_engines_if_missing,
     )
@@ -221,3 +284,15 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1,
         seed_interpolation_method=params.seed_interpolation_method,
     )
     return pipe
+
+
+async def _load_image_from_url(url: str) -> Image.Image:
+    if not (url.startswith('http://') or url.startswith('https://')):
+        raise ValueError(f"Invalid image URL: {url}")
+
+    timeout = aiohttp.ClientTimeout(total=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.read()
+    return Image.open(BytesIO(data)).convert('RGB')
