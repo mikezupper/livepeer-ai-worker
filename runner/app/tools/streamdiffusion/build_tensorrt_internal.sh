@@ -118,9 +118,27 @@ else
     echo
 fi
 
+# Check if the models are SDXL and split the controlnet list for separate builds.
+# SDXL models are big and can't be compiled all together.
+is_sdxl=false
+if [[ "$MODELS" == *sdxl* ]]; then
+    is_sdxl=true
+fi
+
+if $is_sdxl; then
+    if [ -n "$CONTROLNETS" ]; then
+        read -r -a controlnet_list <<< "$CONTROLNETS"
+    else
+        controlnet_list=( "" )
+    fi
+else
+    controlnet_list=( "$CONTROLNETS" )
+fi
+
 # Build TensorRT engines
 echo "Starting TensorRT engine build process..."
 echo "Models: $MODELS"
+echo "Is SDXL: $is_sdxl"
 echo "Opt Timesteps: $OPT_TIMESTEPS"
 echo "Min Timesteps: $MIN_TIMESTEPS"
 echo "Max Timesteps: $MAX_TIMESTEPS"
@@ -148,7 +166,9 @@ total_builds=0
 # Calculate total number of builds
 for model in $MODELS; do
     for dim in $DIMENSIONS; do
-        total_builds=$((total_builds + 1))
+        for cnet in "${controlnet_list[@]}"; do
+            total_builds=$((total_builds + 1))
+        done
     done
 done
 
@@ -159,36 +179,41 @@ current_build=0
 
 for model in $MODELS; do
     for dim in $DIMENSIONS; do
-        current_build=$((current_build + 1))
-
         # Parse dimensions
         width=${dim%x*}
         height=${dim#*x}
 
-        echo "[$current_build/$total_builds] Building TensorRT engine for:"
-        echo "  Model: $model"
-        echo "  Opt Timesteps: $OPT_TIMESTEPS"
-        echo "  Min Timesteps: $MIN_TIMESTEPS"
-        echo "  Max Timesteps: $MAX_TIMESTEPS"
-        echo "  Dimensions: ${width}x${height}"
+        for cnet in "${controlnet_list[@]}"; do
+            current_build=$((current_build + 1))
 
-        # Build the engine
-        if $CONDA_PYTHON "$BUILD_SCRIPT" \
-            --model-id "$model" \
-            --opt-timesteps "$OPT_TIMESTEPS" \
-            --min-timesteps "$MIN_TIMESTEPS" \
-            --max-timesteps "$MAX_TIMESTEPS" \
-            --width "$width" \
-            --height "$height" \
-            --engine-dir "$OUTPUT_DIR" \
-            --controlnets "$CONTROLNETS"; then
-            echo "  ✓ Success"
-        else
-            echo "  ✗ Failed"
-            echo "Aborting build process due to failure."
-            exit 1
-        fi
-        echo
+            echo "[$current_build/$total_builds] Building TensorRT engine for:"
+            echo "  Model: $model"
+            echo "  Opt Timesteps: $OPT_TIMESTEPS"
+            echo "  Min Timesteps: $MIN_TIMESTEPS"
+            echo "  Max Timesteps: $MAX_TIMESTEPS"
+            echo "  Dimensions: ${width}x${height}"
+            if [ -n "$cnet" ]; then
+                echo "  ControlNets: $cnet"
+            fi
+
+            # Build the engine
+            if $CONDA_PYTHON "$BUILD_SCRIPT" \
+                --model-id "$model" \
+                --opt-timesteps "$OPT_TIMESTEPS" \
+                --min-timesteps "$MIN_TIMESTEPS" \
+                --max-timesteps "$MAX_TIMESTEPS" \
+                --width "$width" \
+                --height "$height" \
+                --engine-dir "$OUTPUT_DIR" \
+                --controlnets "$cnet"; then
+                echo "  ✓ Success"
+            else
+                echo "  ✗ Failed"
+                echo "Aborting build process due to failure."
+                exit 1
+            fi
+            echo
+        done
     done
 done
 
@@ -246,14 +271,6 @@ function build_pose_engine() {
     engines_dir="$(readlink -f "$OUTPUT_DIR/pose")"
     mkdir -p "$engines_dir"
 
-    if [ ! -d "ComfyUI-YoloNasPose-Tensorrt" ]; then
-        git clone https://github.com/yuvraj108c/ComfyUI-YoloNasPose-Tensorrt.git \
-            && cd ComfyUI-YoloNasPose-Tensorrt \
-            && git checkout 873de560bb05bf3331e4121f393b83ecc04c324a 2>/dev/null \
-            && $CONDA_PYTHON -m pip install -r requirements.txt \
-            && cd ..
-    fi
-
     echo "Locating YoloNas Pose ONNX models..."
     onnx_model_paths=$(find "$MODELS_DIR" -name "yolo_nas_pose_l_*.onnx" 2>/dev/null)
 
@@ -265,16 +282,36 @@ function build_pose_engine() {
 
     echo "Found ONNX models at: $onnx_model_paths"
 
-    echo "Building $(echo "$onnx_model_paths" | wc -w) YoloNas Pose TensorRT engines..."
-    cd ComfyUI-YoloNasPose-Tensorrt
+    # Check if any engine is missing before cloning the repo
+    missing_engines_onnx=()
     for onnx_path in $onnx_model_paths; do
         engine_path="$engines_dir/$(basename "$onnx_path" .onnx).engine"
-
         if [ -f "$engine_path" ]; then
             echo "Engine already exists at: $engine_path"
-            echo "Skipping build."
-            continue
+            echo "Skipping build for this model."
+        else
+            missing_engines_onnx+=("$onnx_path")
         fi
+    done
+
+    if [ ${#missing_engines_onnx[@]} -eq 0 ]; then
+        echo "All YoloNas Pose TensorRT engines already exist. Skipping build."
+        echo
+        return 0
+    fi
+
+    if [ ! -d "ComfyUI-YoloNasPose-Tensorrt" ]; then
+        git clone https://github.com/yuvraj108c/ComfyUI-YoloNasPose-Tensorrt.git \
+            && cd ComfyUI-YoloNasPose-Tensorrt \
+            && git checkout 873de560bb05bf3331e4121f393b83ecc04c324a 2>/dev/null \
+            && $CONDA_PYTHON -m pip install -r requirements.txt \
+            && cd ..
+    fi
+
+    echo "Building ${#missing_engines_onnx[@]} YoloNas Pose TensorRT engines..."
+    cd ComfyUI-YoloNasPose-Tensorrt
+    for onnx_path in "${missing_engines_onnx[@]}"; do
+        engine_path="$engines_dir/$(basename "$onnx_path" .onnx).engine"
 
         # The export_trt.py script expects a hardcoded path to the model, so create a link
         rm -f "yolo_nas_pose_l.onnx" && ln -sf "$onnx_path" "yolo_nas_pose_l.onnx"

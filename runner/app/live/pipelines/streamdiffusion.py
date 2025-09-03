@@ -13,7 +13,7 @@ from .interface import Pipeline
 from .loading_overlay import LoadingOverlayRenderer
 from trickle import VideoFrame, VideoOutput
 
-from .streamdiffusion_params import StreamDiffusionParams, ControlNetConfig
+from .streamdiffusion_params import StreamDiffusionParams, get_model_type, IPADAPTER_SUPPORTED_TYPES
 
 class StreamDiffusion(Pipeline):
     def __init__(self):
@@ -178,12 +178,7 @@ class StreamDiffusion(Pipeline):
             elif key == 'controlnets':
                 update_kwargs['controlnet_config'] = _prepare_controlnet_configs(new_params)
             elif key == 'ip_adapter':
-                enabled = new_params.ip_adapter and new_params.ip_adapter.enabled
-                if not enabled and new_value:
-                    # Enabled flag is ignored, so we set scale to 0.0 to disable it.
-                    new_value['scale'] = 0.0
-
-                update_kwargs['ipadapter_config'] = new_value
+                update_kwargs['ipadapter_config'] = _prepare_ipadapter_configs(new_params)
                 changed_ipadapter = True
             elif key == 'ip_adapter_style_image_url':
                 # Do not set on update_kwargs, we'll update it separately.
@@ -284,12 +279,37 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
 
     return controlnet_configs
 
+def _prepare_ipadapter_configs(params: StreamDiffusionParams) -> Optional[Dict[str, Any]]:
+    """Prepare IPAdapter configurations for wrapper"""
+    if not params.ip_adapter:
+        return None
+
+    ip_cfg = params.ip_adapter.model_copy()
+    if ip_cfg.ipadapter_model_path:
+        logging.warning(f"[IPAdapter] ipadapter_model_path is deprecated and will be ignored. Use type instead.")
+    if ip_cfg.image_encoder_path:
+        logging.warning(f"[IPAdapter] image_encoder_path is deprecated and will be ignored. Use type instead.")
+
+    model_type = get_model_type(params.model_id)
+    dir = 'sdxl_models' if model_type == 'sdxl' else 'models'
+
+    if not ip_cfg.ipadapter_model_path:
+        match ip_cfg.type:
+            case 'regular':
+                ip_cfg.ipadapter_model_path = f"h94/IP-Adapter/{dir}/ip-adapter_{model_type}.bin" # type: ignore
+            case 'faceid':
+                ip_cfg.ipadapter_model_path = f"h94/IP-Adapter-FaceID/ip-adapter-faceid_{model_type}.bin" # type: ignore
+    if not ip_cfg.image_encoder_path:
+        ip_cfg.image_encoder_path = f"h94/IP-Adapter/{dir}/image_encoder" # type: ignore
+
+    if not ip_cfg.enabled:
+        # Enabled flag is ignored, so we set scale to 0.0 to disable it.
+        ip_cfg.scale = 0.0
+
+    return ip_cfg.model_dump()
+
 
 def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1, max_batch_size = 4, engine_dir = "engines", build_engines_if_missing = False):
-    # Prepare ControlNet configuration
-    controlnet_config = _prepare_controlnet_configs(params)
-    ipadapter_config = params.ip_adapter.model_dump() if params.ip_adapter else None
-
     pipe = StreamDiffusionWrapper(
         model_id_or_path=params.model_id,
         t_index_list=params.t_index_list,
@@ -314,9 +334,9 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1,
         normalize_seed_weights=params.normalize_seed_weights,
         normalize_prompt_weights=params.normalize_prompt_weights,
         use_controlnet=True,
-        controlnet_config=controlnet_config,
-        use_ipadapter=(params.model_id not in ['stabilityai/sd-turbo']),
-        ipadapter_config=ipadapter_config,
+        controlnet_config=_prepare_controlnet_configs(params),
+        use_ipadapter=get_model_type(params.model_id) in IPADAPTER_SUPPORTED_TYPES,
+        ipadapter_config=_prepare_ipadapter_configs(params),
         engine_dir=engine_dir,
         build_engines_if_missing=build_engines_if_missing,
         use_safety_checker=params.use_safety_checker,

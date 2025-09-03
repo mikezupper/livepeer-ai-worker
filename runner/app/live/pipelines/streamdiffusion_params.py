@@ -1,11 +1,39 @@
 from typing import Dict, List, Literal, Optional, Any, Tuple
 
 from pydantic import BaseModel, Field, model_validator
-from streamdiffusion import list_preprocessors
 
 from trickle import DEFAULT_WIDTH, DEFAULT_HEIGHT
 
-AVAILABLE_PREPROCESSORS = list_preprocessors()
+IPADAPTER_SUPPORTED_TYPES = ["sd15"]
+
+CONTROLNETS_BY_TYPE = {
+    "sd21": [
+        "thibaud/controlnet-sd21-openpose-diffusers",
+        "thibaud/controlnet-sd21-hed-diffusers",
+        "thibaud/controlnet-sd21-canny-diffusers",
+        "thibaud/controlnet-sd21-depth-diffusers",
+        "thibaud/controlnet-sd21-color-diffusers",
+    ],
+    "sd15": [
+        "lllyasviel/control_v11f1p_sd15_depth",
+        "lllyasviel/control_v11f1e_sd15_tile",
+        "lllyasviel/control_v11p_sd15_canny",
+    ],
+    "sdxl": [
+        "xinsir/controlnet-depth-sdxl-1.0",
+        "xinsir/controlnet-canny-sdxl-1.0",
+        "xinsir/controlnet-tile-sdxl-1.0",
+    ],
+}
+
+def get_model_type(model_id: str) -> Literal["sd15", "sd21", "sdxl"]:
+    if model_id == "stabilityai/sd-turbo":
+        return "sd21"
+    elif model_id == "stabilityai/sdxl-turbo":
+        return "sdxl"
+    else:
+        return "sd15"
+
 
 class ControlNetConfig(BaseModel):
     """
@@ -26,21 +54,27 @@ class ControlNetConfig(BaseModel):
         "lllyasviel/control_v11f1p_sd15_depth",
         "lllyasviel/control_v11f1e_sd15_tile",
         "lllyasviel/control_v11p_sd15_canny",
+        "xinsir/controlnet-depth-sdxl-1.0",
+        "xinsir/controlnet-canny-sdxl-1.0",
+        "xinsir/controlnet-tile-sdxl-1.0",
     ]
     """ControlNet model identifier. Each model provides different types of conditioning:
     - openpose: Human pose estimation for figure control
     - hed: Holistically-nested edge detection for line art control
     - canny: Canny edge detection for detailed edge control
     - depth: Depth estimation for 3D spatial control
-    - color: Color palette control for hue/saturation guidance"""
+    - color: Color palette control for hue/saturation guidance
+    - tile: Super-resolution and detail enhancement through tiling"""
 
     conditioning_scale: float = 1.0
     """Strength of the ControlNet's influence on generation. Higher values make the model follow the control signal more strictly. Typical range 0.0-1.0, where 0.0 disables the control and 1.0 applies full control."""
 
-    preprocessor: Optional[str] = None
+    preprocessor: Literal[
+        "canny", "depth", "openpose", "lineart", "standard_lineart", "passthrough", "external", "soft_edge", "hed", "feedback", "depth_tensorrt", "pose_tensorrt", "mediapipe_pose", "mediapipe_segmentation"
+    ] = "passthrough"
     """Preprocessor to apply to input frames before feeding to the ControlNet. Common options include 'pose_tensorrt', 'soft_edge', 'canny', 'depth_tensorrt', 'passthrough'. If None, no preprocessing is applied."""
 
-    preprocessor_params: Optional[Dict[str, Any]] = None
+    preprocessor_params: Dict[str, Any] = {}
     """Additional parameters for the preprocessor. For example, canny edge detection uses 'low_threshold' and 'high_threshold' values."""
 
     enabled: bool = True
@@ -112,14 +146,19 @@ class IPAdapterConfig(BaseModel):
     type: Literal["regular", "faceid"] = "regular"
     """Type of IPAdapter to use. FaceID is used for face-specific style transfer."""
 
-    ipadapter_model_path: Literal[
+    ipadapter_model_path: Optional[Literal[
         "h94/IP-Adapter/models/ip-adapter_sd15.bin",
-        "h94/IP-Adapter-FaceID/ip-adapter-faceid_sd15.bin"
-    ] = "h94/IP-Adapter/models/ip-adapter_sd15.bin"
-    """Path to IPAdapter model file"""
+        "h94/IP-Adapter/sdxl_models/ip-adapter_sdxl.bin",
+        "h94/IP-Adapter-FaceID/ip-adapter-faceid_sd15.bin",
+        "h94/IP-Adapter-FaceID/ip-adapter-faceid_sdxl.bin",
+    ]] = None
+    """[DEPRECATED] This field is no longer used. The IPAdapter model path is automatically determined based on the IP-Adapter type and diffusion model type."""
 
-    image_encoder_path: Literal["h94/IP-Adapter/models/image_encoder"] = "h94/IP-Adapter/models/image_encoder"
-    """Path to image encoder model"""
+    image_encoder_path: Optional[Literal[
+        "h94/IP-Adapter/models/image_encoder",
+        "h94/IP-Adapter/sdxl_models/image_encoder",
+    ]] = None
+    """[DEPRECATED] This field is no longer used. The image encoder path is automatically determined based on the IP-Adapter type and diffusion model type."""
 
     insightface_model_name: Optional[str] = None
     """InsightFace model name for FaceID. Used only if type is 'faceid'."""
@@ -156,6 +195,7 @@ class StreamDiffusionParams(BaseModel):
     model_id: Literal[
         "stabilityai/sd-turbo",
         "varb15/PerfectPhotonV2.1",
+        "stabilityai/sdxl-turbo",
     ] = "stabilityai/sd-turbo"
     """Base U-Net model to use for generation."""
 
@@ -266,15 +306,34 @@ class StreamDiffusionParams(BaseModel):
             if curr < prev:
                 raise ValueError(f"t_index_list must be in non-decreasing order. {curr} < {prev}")
 
-        # Check for duplicate controlnet model_ids
-        if model.controlnets:
-            seen_model_ids = set()
-            for cn in model.controlnets:
-                if cn.model_id in seen_model_ids:
-                    raise ValueError(f"Duplicate controlnet model_id: {cn.model_id}")
-                seen_model_ids.add(cn.model_id)
+        return model
 
-                if cn.preprocessor not in AVAILABLE_PREPROCESSORS:
-                    raise ValueError(f"Unrecognized preprocessor: '{cn.preprocessor}'. Must be one of {AVAILABLE_PREPROCESSORS}")
+    @model_validator(mode="after")
+    @staticmethod
+    def check_ip_adapter(model: "StreamDiffusionParams") -> "StreamDiffusionParams":
+        supported = get_model_type(model.model_id) in IPADAPTER_SUPPORTED_TYPES
+        enabled = model.ip_adapter and model.ip_adapter.enabled
+        if not supported and enabled:
+            raise ValueError(f"IPAdapter is not supported for {model.model_id}")
+        return model
+
+    @model_validator(mode="after")
+    @staticmethod
+    def check_controlnets(model: "StreamDiffusionParams") -> "StreamDiffusionParams":
+        if not model.controlnets:
+            return model
+
+        cn_ids = set()
+        for cn in model.controlnets:
+            if cn.model_id in cn_ids:
+                raise ValueError(f"Duplicate controlnet model_id: {cn.model_id}")
+            cn_ids.add(cn.model_id)
+
+        model_type = get_model_type(model.model_id)
+        supported_cns = CONTROLNETS_BY_TYPE.get(model_type, [])
+
+        invalid_cns = [cn for cn in cn_ids if cn not in supported_cns]
+        if invalid_cns:
+            raise ValueError(f"Invalid ControlNets for model {model.model_id}: {invalid_cns}")
 
         return model
