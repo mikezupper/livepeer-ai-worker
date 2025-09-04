@@ -42,7 +42,7 @@
       "control_guidance_end": 1.0
     },
     {
-      "model_id": "lllyasviel/control_v11f1e_sd15_canny",
+      "model_id": "lllyasviel/control_v11p_sd15_canny",
       "conditioning_scale": 0.0,
       "preprocessor": "feedback",
       "preprocessor_params": {},
