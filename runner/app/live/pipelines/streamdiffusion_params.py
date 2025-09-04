@@ -4,9 +4,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from trickle import DEFAULT_WIDTH, DEFAULT_HEIGHT
 
-IPADAPTER_SUPPORTED_TYPES = ["sd15"]
+ModelType = Literal["sd15", "sd21", "sdxl"]
 
-CONTROLNETS_BY_TYPE = {
+IPADAPTER_SUPPORTED_TYPES: List[ModelType] = ["sd15"]
+
+CONTROLNETS_BY_TYPE: Dict[ModelType, List[str]] = {
     "sd21": [
         "thibaud/controlnet-sd21-openpose-diffusers",
         "thibaud/controlnet-sd21-hed-diffusers",
@@ -26,13 +28,24 @@ CONTROLNETS_BY_TYPE = {
     ],
 }
 
-def get_model_type(model_id: str) -> Literal["sd15", "sd21", "sdxl"]:
-    if model_id == "stabilityai/sd-turbo":
-        return "sd21"
-    elif model_id == "stabilityai/sdxl-turbo":
-        return "sdxl"
-    else:
-        return "sd15"
+MODEL_ID_TO_TYPE: Dict[str, ModelType] = {
+    "stabilityai/sd-turbo": "sd21",
+    "SG161222/Realistic_Vision_V6.0_B1_noVAE": "sd15",
+    "varb15/PerfectPhotonV2.1": "sd15",
+    "stabilityai/sdxl-turbo": "sdxl",
+    "Lykon/dreamshaper-8": "sd15",
+    "prompthero/openjourney-v4": "sd15",
+    "dreamlike-art/dreamlike-diffusion-1.0": "sd15",
+    "dreamlike-art/dreamlike-photoreal-2.0": "sd15",
+    "danbrown/Lyriel-v1-5": "sd15",
+    "stablediffusionapi/deliberate-v2": "sd15",
+    "Lykon/dreamshaper-8-lcm": "sd15",
+}
+
+def get_model_type(model_id: str) -> ModelType:
+    if model_id not in MODEL_ID_TO_TYPE:
+        raise ValueError(f"Invalid model_id: {model_id}")
+    return MODEL_ID_TO_TYPE[model_id]
 
 
 class ControlNetConfig(BaseModel):
@@ -88,54 +101,22 @@ class ControlNetConfig(BaseModel):
 
 _DEFAULT_CONTROLNETS = [
     ControlNetConfig(
-        model_id="thibaud/controlnet-sd21-openpose-diffusers",
-        conditioning_scale=0.711,
-        preprocessor="pose_tensorrt",
-        preprocessor_params={},
-        enabled=True,
-        control_guidance_start=0.0,
-        control_guidance_end=1.0,
+      model_id="lllyasviel/control_v11f1p_sd15_depth",
+      conditioning_scale=1.0,
+      preprocessor="depth_tensorrt"
     ),
     ControlNetConfig(
-        model_id="thibaud/controlnet-sd21-hed-diffusers",
-        conditioning_scale=0.2,
-        preprocessor="soft_edge",
-        preprocessor_params={},
-        enabled=True,
-        control_guidance_start=0.0,
-        control_guidance_end=1.0,
+      model_id="lllyasviel/control_v11f1e_sd15_tile",
+      conditioning_scale=0.0,
+      preprocessor="feedback"
     ),
     ControlNetConfig(
-        model_id="thibaud/controlnet-sd21-canny-diffusers",
-        conditioning_scale=0.2,
-        preprocessor="canny",
-        preprocessor_params={
-            "low_threshold": 100,
-            "high_threshold": 200
-        },
-        enabled=True,
-        control_guidance_start=0.0,
-        control_guidance_end=1.0,
-    ),
-    ControlNetConfig(
-        model_id="thibaud/controlnet-sd21-depth-diffusers",
-        conditioning_scale=0.5,
-        preprocessor="depth_tensorrt",
-        preprocessor_params={},
-        enabled=True,
-        control_guidance_start=0.0,
-        control_guidance_end=1.0,
-    ),
-    ControlNetConfig(
-        model_id="thibaud/controlnet-sd21-color-diffusers",
-        conditioning_scale=0.2,
-        preprocessor="passthrough",
-        preprocessor_params={},
-        enabled=True,
-        control_guidance_start=0.0,
-        control_guidance_end=1.0,
-    ),
-]
+      model_id="lllyasviel/control_v11p_sd15_canny",
+      conditioning_scale=0.0,
+      preprocessor="feedback"
+    )
+  ]
+
 class IPAdapterConfig(BaseModel):
     """
     IPAdapter configuration for style transfer.
@@ -194,9 +175,17 @@ class StreamDiffusionParams(BaseModel):
     # Model configuration
     model_id: Literal[
         "stabilityai/sd-turbo",
+        "SG161222/Realistic_Vision_V6.0_B1_noVAE",
         "varb15/PerfectPhotonV2.1",
         "stabilityai/sdxl-turbo",
-    ] = "stabilityai/sd-turbo"
+        "Lykon/dreamshaper-8",
+        "prompthero/openjourney-v4",
+        "dreamlike-art/dreamlike-diffusion-1.0",
+        "dreamlike-art/dreamlike-photoreal-2.0",
+        "danbrown/Lyriel-v1-5",
+        "stablediffusionapi/deliberate-v2",
+        "Lykon/dreamshaper-8-lcm",
+    ] = "SG161222/Realistic_Vision_V6.0_B1_noVAE"
     """Base U-Net model to use for generation."""
 
     # Generation parameters
