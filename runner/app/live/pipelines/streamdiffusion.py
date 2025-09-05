@@ -39,8 +39,7 @@ class StreamDiffusion(Pipeline):
         async with self._pipeline_lock:
             loading_frame = await self._overlay_renderer.render_if_active(self.params.width, self.params.height)
             if loading_frame is not None:
-                output = VideoOutput(frame, request_id).replace_tensor(loading_frame)
-                output.is_loading_frame = True
+                output = VideoOutput(frame, request_id, is_loading_frame=True).replace_tensor(loading_frame)
             else:
                 out_tensor = await asyncio.to_thread(self.process_tensor_sync, frame.tensor)
                 output = VideoOutput(frame, request_id).replace_tensor(out_tensor)
@@ -152,8 +151,9 @@ class StreamDiffusion(Pipeline):
         updatable_params = {
             'num_inference_steps', 'guidance_scale', 'delta', 't_index_list',
             'prompt', 'prompt_interpolation_method', 'normalize_prompt_weights', 'negative_prompt',
-            'seed', 'seed_interpolation_method', 'normalize_seed_weights', 'use_safety_checker',
-            'controlnets', 'ip_adapter', 'ip_adapter_style_image_url', 'show_reloading_frame'
+            'seed', 'seed_interpolation_method', 'normalize_seed_weights',
+            'use_safety_checker', 'safety_checker_threshold', 'controlnets',
+            'ip_adapter', 'ip_adapter_style_image_url', 'show_reloading_frame'
         }
 
         update_kwargs = {}
@@ -167,7 +167,7 @@ class StreamDiffusion(Pipeline):
                 logging.info(f"Non-updatable parameter changed: {key}")
                 return False
             elif key == 'show_reloading_frame':
-                # Handled in update_params
+                # Handled by us in update_params, not a config from the lib
                 continue
 
             # at this point, we know it's an updatable parameter that changed
@@ -309,7 +309,13 @@ def _prepare_ipadapter_configs(params: StreamDiffusionParams) -> Optional[Dict[s
     return ip_cfg.model_dump()
 
 
-def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1, max_batch_size = 4, engine_dir = "engines", build_engines_if_missing = False):
+def load_streamdiffusion_sync(
+    params: StreamDiffusionParams,
+    min_batch_size=1,
+    max_batch_size=4,
+    engine_dir="engines",
+    build_engines=False,
+) -> StreamDiffusionWrapper:
     pipe = StreamDiffusionWrapper(
         model_id_or_path=params.model_id,
         t_index_list=params.t_index_list,
@@ -338,8 +344,10 @@ def load_streamdiffusion_sync(params: StreamDiffusionParams, min_batch_size = 1,
         use_ipadapter=get_model_type(params.model_id) in IPADAPTER_SUPPORTED_TYPES,
         ipadapter_config=_prepare_ipadapter_configs(params),
         engine_dir=engine_dir,
-        build_engines_if_missing=build_engines_if_missing,
+        build_engines_if_missing=build_engines,
+        compile_engines_only=build_engines,
         use_safety_checker=params.use_safety_checker,
+        safety_checker_threshold=params.safety_checker_threshold,
     )
 
     pipe.prepare(
