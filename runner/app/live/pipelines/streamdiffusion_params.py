@@ -101,22 +101,54 @@ class ControlNetConfig(BaseModel):
 
 _DEFAULT_CONTROLNETS = [
     ControlNetConfig(
-      model_id="lllyasviel/control_v11f1p_sd15_depth",
-      conditioning_scale=1.0,
-      preprocessor="depth_tensorrt"
+        model_id="thibaud/controlnet-sd21-openpose-diffusers",
+        conditioning_scale=0.711,
+        preprocessor="pose_tensorrt",
+        preprocessor_params={},
+        enabled=True,
+        control_guidance_start=0.0,
+        control_guidance_end=1.0,
     ),
     ControlNetConfig(
-      model_id="lllyasviel/control_v11f1e_sd15_tile",
-      conditioning_scale=0.0,
-      preprocessor="feedback"
+        model_id="thibaud/controlnet-sd21-hed-diffusers",
+        conditioning_scale=0.2,
+        preprocessor="soft_edge",
+        preprocessor_params={},
+        enabled=True,
+        control_guidance_start=0.0,
+        control_guidance_end=1.0,
     ),
     ControlNetConfig(
-      model_id="lllyasviel/control_v11p_sd15_canny",
-      conditioning_scale=0.0,
-      preprocessor="feedback"
-    )
-  ]
-
+        model_id="thibaud/controlnet-sd21-canny-diffusers",
+        conditioning_scale=0.2,
+        preprocessor="canny",
+        preprocessor_params={
+            "low_threshold": 100,
+            "high_threshold": 200
+        },
+        enabled=True,
+        control_guidance_start=0.0,
+        control_guidance_end=1.0,
+    ),
+    ControlNetConfig(
+        model_id="thibaud/controlnet-sd21-depth-diffusers",
+        conditioning_scale=0.5,
+        preprocessor="depth_tensorrt",
+        preprocessor_params={},
+        enabled=True,
+        control_guidance_start=0.0,
+        control_guidance_end=1.0,
+    ),
+    ControlNetConfig(
+        model_id="thibaud/controlnet-sd21-color-diffusers",
+        conditioning_scale=0.2,
+        preprocessor="passthrough",
+        preprocessor_params={},
+        enabled=True,
+        control_guidance_start=0.0,
+        control_guidance_end=1.0,
+    ),
+]
 class IPAdapterConfig(BaseModel):
     """
     IPAdapter configuration for style transfer.
@@ -185,7 +217,7 @@ class StreamDiffusionParams(BaseModel):
         "danbrown/Lyriel-v1-5",
         "stablediffusionapi/deliberate-v2",
         "Lykon/dreamshaper-8-lcm",
-    ] = "SG161222/Realistic_Vision_V6.0_B1_noVAE"
+    ] = "stabilityai/sd-turbo"
     """Base U-Net model to use for generation."""
 
     # Generation parameters
