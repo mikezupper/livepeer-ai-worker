@@ -267,7 +267,7 @@ def _prepare_controlnet_configs(params: StreamDiffusionParams) -> Optional[List[
 
             engine_path = f"./engines/pose/yolo_nas_pose_l_{confidence_threshold}.engine"
             if not os.path.exists(engine_path):
-                raise ValueError(f"Invalid confidence threshold: {confidence_threshold}")
+                raise ValueError(f"Engine file not found: {engine_path}")
 
             preprocessor_params.update({
                 "engine_path": engine_path,
