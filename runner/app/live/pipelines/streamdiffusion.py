@@ -106,14 +106,18 @@ class StreamDiffusion(Pipeline):
                 if await self._update_params_dynamic(new_params):
                     return
             except Exception as e:
-                logging.error(f"Error updating parameters dynamically: {e}")
+                logging.error(
+                    f"[update_params] Error updating params dynamically, reloading pipeline: {e}",
+                    extra={"report_error": True},
+                    exc_info=True,
+                )
 
         logging.info(f"Resetting pipeline for params change")
 
         try:
             await self._overlay_renderer.prewarm(new_params.width, new_params.height)
         except Exception:
-            logging.debug("Failed to prewarm loading overlay caches", exc_info=True)
+            logging.warning("Failed to prewarm loading overlay caches", exc_info=True)
 
         async with self._pipeline_lock:
             # Clear the pipeline while loading the new one. The loading overlay will be shown while this is happening.
@@ -124,14 +128,18 @@ class StreamDiffusion(Pipeline):
         new_pipe: Optional[StreamDiffusionWrapper] = None
         try:
             new_pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
-        except Exception:
-            logging.error(f"Error resetting pipeline, reloading with previous params", exc_info=True)
+        except Exception as e:
+            logging.error(
+                f"[update_params] Error reloading pipeline, falling back to previous params: {e}",
+                extra={"report_error": True},
+                exc_info=True,
+            )
             try:
                 new_params = prev_params or StreamDiffusionParams()
                 new_pipe = await asyncio.to_thread(load_streamdiffusion_sync, new_params)
-            except Exception:
-                logging.exception("Failed to reload pipeline with fallback params", stack_info=True)
-                raise
+            except Exception as e:
+                # No need to log here as we have to bubble up the error to the caller.
+                raise RuntimeError(f"Failed to reload pipeline with previous params: {e}") from e
 
         async with self._pipeline_lock:
             self.pipe = new_pipe
