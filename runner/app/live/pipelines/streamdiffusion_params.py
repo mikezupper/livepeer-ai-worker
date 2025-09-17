@@ -65,11 +65,11 @@ class ControlNetConfig(BaseModel):
     ]
     """ControlNet model identifier. Each model provides different types of conditioning:
     - openpose: Human pose estimation for figure control
-    - hed: Holistically-nested edge detection for line art control
-    - canny: Canny edge detection for detailed edge control
-    - depth: Depth estimation for 3D spatial control
-    - color: Color palette control for hue/saturation guidance
-    - tile: Super-resolution and detail enhancement through tiling"""
+    - hed: Soft edge/inner contour guidance; captures gentle gradients rather than crisp outlines
+    - canny: Crisp silhouette/edge guidance; follows strong, high-contrast boundaries
+    - depth: Depth guidance for 3D structure and spatial layout
+    - color: Increases adherence/pass-through to the input's color palette (raise to keep colors)
+    - tile: Detail refinement through tiling to enhance local texture and preserve structure on low-resolution inputs"""
 
     conditioning_scale: float = 1.0
     """Strength of the ControlNet's influence on generation. Higher values make the model follow the control signal more strictly. Typical range 0.0-1.0, where 0.0 disables the control and 1.0 applies full control."""
