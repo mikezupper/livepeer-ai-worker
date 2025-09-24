@@ -7,8 +7,7 @@ from enum import Enum
 from .process_manager import ProcessManager
 from .protocol.protocol import StreamProtocol
 from .status import timestamp_to_ms
-from app.live.trickle import InputFrame, OutputFrame, AudioFrame, VideoFrame, AudioOutput, VideoOutput
-
+from trickle import InputFrame, AudioFrame, VideoFrame, OutputFrame, VideoOutput, AudioOutput
 
 class StreamSessionState(Enum):
     STOPPED = "STOPPED"

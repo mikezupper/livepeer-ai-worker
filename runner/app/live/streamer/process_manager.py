@@ -5,10 +5,8 @@ from typing import Optional
 
 from .process import PipelineProcess
 from .status import PipelineState, PipelineStatus, InferenceStatus, InputStatus
-from app.live.trickle import InputFrame, OutputFrame
-
+from trickle import InputFrame, AudioFrame, VideoFrame, OutputFrame, VideoOutput, AudioOutput
 FPS_LOG_INTERVAL = 10.0
-
 
 class ProcessManager:
     """

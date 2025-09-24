@@ -3,11 +3,10 @@ import logging
 import json
 from typing import AsyncGenerator, Optional
 
+from trickle import media, TricklePublisher, TrickleSubscriber, InputFrame, OutputFrame, AudioFrame, AudioOutput, DEFAULT_WIDTH, DEFAULT_HEIGHT
+
 from .protocol import StreamProtocol
 from .last_value_cache import LastValueCache
-from app.live.trickle import DEFAULT_WIDTH, DEFAULT_HEIGHT, InputFrame, OutputFrame, TrickleSubscriber, TricklePublisher, \
-    AudioFrame, AudioOutput, media
-
 
 class TrickleProtocol(StreamProtocol):
     """

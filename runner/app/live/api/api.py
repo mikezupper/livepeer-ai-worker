@@ -22,7 +22,6 @@ MAX_FILE_AGE = 86400  # 1 day
 # left over resources (e.g. trickle channels) left by a crashed process.
 last_params_file = os.path.join(tempfile.gettempdir(), "ai_runner_last_params.json")
 
-
 class StartStreamParams(BaseModel):
     subscribe_url: Annotated[
         str,
@@ -69,7 +68,6 @@ class StartStreamParams(BaseModel):
         Field(default="", description="Unique identifier for the stream."),
     ]
 
-
 async def cleanup_last_stream():
     """Clean up any leftover trickle channels from previous crashed sessions."""
     if not os.path.exists(last_params_file):
@@ -95,13 +93,11 @@ async def cleanup_last_stream():
     except:
         logging.exception(f"Error cleaning up last stream trickle channels")
 
-
 async def parse_request_data(request: web.Request) -> Dict:
     if request.content_type.startswith("application/json"):
         return await request.json()
     else:
         raise ValueError(f"Unknown content type: {request.content_type}")
-
 
 async def handle_start_stream(request: web.Request):
     """Handle POST /api/live-video-to-video - start a new streaming session."""
@@ -169,7 +165,6 @@ async def handle_start_stream(request: web.Request):
         }, queue_event_type="stream_trace")
 
         return web.Response(text="Stream started successfully")
-
     except Exception as e:
         logging.error(f"Error starting stream: {e}")
         return web.Response(text=f"Error starting stream: {str(e)}", status=400)
@@ -191,7 +186,6 @@ async def handle_params_update(request: web.Request):
             await session.update_params(params)
 
         return web.Response(text="Params updated successfully")
-
     except Exception as e:
         logging.error(f"Error updating params: {e}")
         return web.Response(text=f"Error updating params: {str(e)}", status=400)
