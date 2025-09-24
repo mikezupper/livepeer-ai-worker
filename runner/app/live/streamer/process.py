@@ -6,13 +6,24 @@ import json
 import torch.multiprocessing as mp
 import queue
 import sys
+import signal
+import threading
 import time
 from typing import Any
+
 import torch
 
 from pipelines import load_pipeline, Pipeline
 from log import config_logging, config_logging_fields, log_timing
-from trickle import InputFrame, AudioFrame, VideoFrame, OutputFrame, VideoOutput, AudioOutput
+from trickle import (
+    InputFrame,
+    AudioFrame,
+    VideoFrame,
+    OutputFrame,
+    VideoOutput,
+    AudioOutput,
+)
+
 
 class PipelineProcess:
     @staticmethod
@@ -47,33 +58,43 @@ class PipelineProcess:
     async def stop(self):
         self.done.set()
 
-        if not self.process.is_alive():
+
+        is_terminating = False
+        if not self.is_alive():
             logging.info("Process already not alive")
         else:
             logging.info("Terminating pipeline process")
+            is_terminating = True
+            self.process.terminate()
 
-            async def wait_stop(timeout: float) -> bool:
-                try:
-                    await asyncio.to_thread(self.process.join, timeout=timeout)
-                    return not self.process.is_alive()
-                except Exception as e:
-                    logging.error(f"Process join error: {e}")
-                    return False
+            if await self._wait_stop(5):
+                is_terminating = False
 
-            if not await wait_stop(10):
-                logging.error("Failed to terminate process, killing")
-                self.process.kill()
-                if not await wait_stop(5):
-                    logging.error("Failed to kill process")
-
-        logging.info("Pipeline process terminated, closing queues")
-
+        logging.info("Closing process queues")
         for q in [self.input_queue, self.output_queue, self.param_update_queue,
                   self.error_queue, self.log_queue]:
             q.cancel_join_thread()
             q.close()
 
+        if is_terminating and self.is_alive():
+            logging.error("Failed to terminate process, killing")
+            self.process.kill()
+            if not await self._wait_stop(3):
+                logging.error(f"Failed to kill process self_pid={os.getpid()} child_pid={self.process.pid} is_alive={self.process.is_alive()}")
+                raise RuntimeError("Failed to kill process")
+
         logging.info("Pipeline process cleanup complete")
+
+    async def _wait_stop(self, timeout: float) -> bool:
+        """
+        Wait for the process to stop and return True if it did, False otherwise.
+        """
+        try:
+            await asyncio.to_thread(self.process.join, timeout=timeout)
+            return not self.process.is_alive()
+        except Exception as e:
+            logging.error(f"Process join error: {e}")
+            return False
 
     def is_done(self):
         return self.done.is_set()
@@ -138,6 +159,9 @@ class PipelineProcess:
         return logs[-n:] if n is not None else logs  # Only limit if n is specified
 
     def process_loop(self):
+        _setup_signal_handlers(self.done)
+        _setup_parent_death_signal()
+        _start_parent_watchdog(self.done)
         self._setup_logging()
 
         # Ensure CUDA environment is available inside the subprocess.
@@ -157,7 +181,6 @@ class PipelineProcess:
             asyncio.run(self._run_pipeline_loops())
         except Exception as e:
             self._report_error("Error in process run method", e)
-
 
     def _handle_logging_params(self, params: dict) -> bool:
         if isinstance(params, dict) and "request_id" in params and "manifest_id" in params and "stream_id" in params:
@@ -398,3 +421,92 @@ def clear_queue(queue):
             queue.get_nowait()  # Remove items without blocking
         except Exception as e:
             logging.error(f"Error while clearing queue: {e}")
+
+def _setup_signal_handlers(
+    done: mp.Event,
+    signals: list[signal.Signals] = [signal.SIGTERM, signal.SIGINT],
+):
+    """
+    Install signal handlers for graceful shutdown in the process. When a signal is received,
+    we set the provided done_event (supports multiprocessing.Event or similar interfaces).
+    """
+
+    def _handle(sig, _frame):
+        logging.info(f"Received signal: {sig}. Initiating graceful shutdown.")
+        try:
+            done.set()
+        except Exception as e:
+            logging.error(
+                "Terminating process (child) due to failure handling signal",
+                exc_info=e,
+            )
+            os._exit(1)
+
+    for sig in signals:
+        signal.signal(sig, _handle)
+
+
+is_linux = sys.platform.startswith("linux")
+is_unix = is_linux or sys.platform == "darwin"
+
+
+def _setup_parent_death_signal():
+    """
+    Ensure the child gets a SIGTERM if the parent dies when running in Linux.
+    This is a best-effort attempt, and errors are logged but ignored.
+    """
+    if not is_linux:
+        logging.info(
+            f"Skipping Linux-only parent death signal setup due to unsupported platform={sys.platform}"
+        )
+        return
+
+    try:
+        import ctypes
+        from ctypes.util import find_library
+
+        libc_path = find_library("c") or "libc.so.6"
+        libc = ctypes.CDLL(libc_path, use_errno=True)
+
+        # This is the code for the "parent death signal" feature in Linux
+        PR_SET_PDEATHSIG = 1
+        res = libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        if res != 0:
+            err = ctypes.get_errno()
+            logging.warning(f"prctl(PR_SET_PDEATHSIG) failed with errno={err}")
+    except Exception as e:
+        logging.warning(f"Unable to set PDEATHSIG: {e}")
+
+
+def _start_parent_watchdog(done: mp.Event):
+    """
+    Start a lightweight watchdog to observe parent death as a cross-platform fallback
+    """
+
+    # Only supported on Unix-like systems where PPID becomes 1 after parent death.
+    # TODO: Add Windows support using a parent process handle wait (OpenProcess + WaitForSingleObject).
+    if not is_unix:
+        logging.info(
+            f"Skipping Unix-only parent watchdog due to unsupported platform={sys.platform}"
+        )
+        return
+
+    def _watch_parent():
+        try:
+            while not done.is_set():
+                time.sleep(1)
+                if os.getppid() == 1:
+                    logging.error(
+                        "Parent process died; initiating graceful shutdown in child"
+                    )
+                    done.set()
+                    break
+        except Exception as e:
+            logging.error(
+                "Terminating child process due to failure in watchdog",
+                exc_info=e,
+            )
+            os._exit(1)
+
+    t = threading.Thread(target=_watch_parent, name="parent-watchdog", daemon=True)
+    t.start()
