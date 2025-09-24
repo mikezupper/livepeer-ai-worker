@@ -9,7 +9,7 @@ import traceback
 import threading
 from typing import List
 
-from streamer import PipelineStreamer, ProcessGuardian
+from streamer import ProcessManager, StreamSession
 
 # loads neighbouring modules with absolute paths
 infer_root = os.path.abspath(os.path.dirname(__file__))
@@ -34,10 +34,12 @@ def thread_exception_hook(original_hook):
     """
     Creates a custom exception hook for threads that logs the error and terminates the application.
     """
+
     def custom_hook(args):
         logging.error("Terminating process due to unhandled exception in thread", exc_info=args.exc_value)
-        original_hook(args) # this is most likely a noop
+        original_hook(args)  # this is most likely a noop
         os._exit(1)
+
     return custom_hook
 
 
@@ -58,49 +60,60 @@ async def main(
     loop = asyncio.get_event_loop()
     loop.set_exception_handler(asyncio_exception_handler)
 
-    process = ProcessGuardian(pipeline, params or {})
-    # Only initialize the streamer if we have a protocol and URLs to connect to
-    streamer = None
-    if stream_protocol and subscribe_url and publish_url:
-        width = params.get('width', DEFAULT_WIDTH)
-        height = params.get('height', DEFAULT_HEIGHT)
-        if stream_protocol == "trickle":
-            protocol = TrickleProtocol(
-                subscribe_url, publish_url, control_url, events_url, width, height
-            )
-        elif stream_protocol == "zeromq":
-            protocol = ZeroMQProtocol(subscribe_url, publish_url)
-        else:
-            raise ValueError(f"Unsupported protocol: {stream_protocol}")
-        streamer = PipelineStreamer(protocol, process, request_id, stream_id)
+    # Create the ProcessManager (renamed from ProcessGuardian)
+    # This handles the AI pipeline subprocess - one instance for the app lifecycle
+    process_manager = ProcessManager(pipeline, params or {})
 
+    # Start the HTTP server with the process manager
+    # The session will be created per-stream in the HTTP handlers
     api = None
     try:
-        with log_timing("starting ProcessGuardian"):
-            await process.start()
-            if streamer:
-                await streamer.start(params)
-            api = await start_http_server(http_port, process, streamer)
+        with log_timing("starting ProcessManager"):
+            await process_manager.start()
 
+            # If we have stream parameters, create an initial session
+            # This preserves the behavior when infer.py is called with stream args
+            session = None
+            if stream_protocol and subscribe_url and publish_url:
+                width = params.get('width', DEFAULT_WIDTH)
+                height = params.get('height', DEFAULT_HEIGHT)
+
+                if stream_protocol == "trickle":
+                    protocol = TrickleProtocol(
+                        subscribe_url, publish_url, control_url, events_url, width, height
+                    )
+                elif stream_protocol == "zeromq":
+                    protocol = ZeroMQProtocol(subscribe_url, publish_url)
+                else:
+                    raise ValueError(f"Unsupported protocol: {stream_protocol}")
+
+                session = StreamSession(protocol, process_manager, request_id, manifest_id, stream_id)
+                await session.start(params)
+
+            # Start HTTP server - it will create sessions as needed via the API
+            api = await start_http_server(http_port, process_manager, session)
+
+        # Wait for shutdown signals or session completion
         tasks: List[asyncio.Task] = []
-        if streamer:
-            tasks.append(asyncio.create_task(streamer.wait()))
+        if session:
+            tasks.append(asyncio.create_task(session.wait()))
         tasks.append(
             asyncio.create_task(block_until_signal([signal.SIGINT, signal.SIGTERM]))
         )
 
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
     except Exception as e:
-        logging.error(f"Error starting socket handler or HTTP server: {e}")
+        logging.error(f"Error starting process manager or HTTP server: {e}")
         logging.error(f"Stack trace:\n{traceback.format_exc()}")
         raise e
     finally:
-        if streamer:
-            streamer.trigger_stop_stream()
-            await streamer.wait(timeout=5)
+        # Cleanup in reverse order
+        if session:
+            await session.stop(timeout=5)
         if api:
             await api.cleanup()
-        await process.stop()
+        await process_manager.stop()
 
 
 async def block_until_signal(sigs: List[signal.Signals]):
@@ -175,6 +188,7 @@ if __name__ == "__main__":
         "--stream-id", type=str, default="", help="The Livepeer stream ID"
     )
     args = parser.parse_args()
+
     try:
         params = json.loads(args.initial_params)
     except Exception as e:
@@ -185,7 +199,7 @@ if __name__ == "__main__":
         os.environ["VERBOSE_LOGGING"] = "1"  # enable verbose logging in sub-processes
 
     config_logging(
-        log_level=logging.DEBUG if os.getenv("VERBOSE_LOGGING")=="1" else logging.INFO,
+        log_level=logging.DEBUG if os.getenv("VERBOSE_LOGGING") == "1" else logging.INFO,
         request_id=args.request_id,
         manifest_id=args.manifest_id,
         stream_id=args.stream_id,

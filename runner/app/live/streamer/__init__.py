@@ -1,4 +1,13 @@
-from .streamer import PipelineStreamer
-from .process_guardian import ProcessGuardian
+# Updated streamer/__init__.py - Export new architecture classes
 
-__all__ = ["PipelineStreamer", "ProcessGuardian"]
+from .process_manager import ProcessManager
+from .session import StreamSession
+
+# Keep existing exports that are still used
+from .process import PipelineProcess
+
+__all__ = [
+    "ProcessManager",
+    "StreamSession",
+    "PipelineProcess",
+]
