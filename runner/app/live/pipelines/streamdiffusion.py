@@ -4,7 +4,6 @@ import asyncio
 from typing import Dict, List, Optional, Any, cast
 
 import torch
-from streamdiffusion import StreamDiffusionWrapper
 from PIL import Image
 from io import BytesIO
 import aiohttp
@@ -14,6 +13,8 @@ from .loading_overlay import LoadingOverlayRenderer
 from trickle import VideoFrame, VideoOutput
 
 from .streamdiffusion_params import StreamDiffusionParams, IPAdapterConfig, get_model_type, IPADAPTER_SUPPORTED_TYPES
+
+from streamdiffusion import StreamDiffusionWrapper
 
 class StreamDiffusion(Pipeline):
     def __init__(self):
