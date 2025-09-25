@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-from pipelines import load_pipeline, Pipeline
+from pipelines import load_pipeline, Pipeline, BaseParams
 from log import config_logging, config_logging_fields, log_timing
 from trickle import (
     InputFrame,
@@ -23,6 +23,8 @@ from trickle import (
     VideoOutput,
     AudioOutput,
 )
+
+from .loading_overlay import LoadingOverlayRenderer
 
 
 class PipelineProcess:
@@ -46,18 +48,20 @@ class PipelineProcess:
         self.log_queue = self.ctx.Queue(maxsize=100)  # Keep last 100 log lines
 
         self.pipeline_ready = self.ctx.Event()
-        self.pipeline_ready_time = self.ctx.Value('d', 0.0)
+        self.pipeline_ready_time = self.ctx.Value("d", 0.0)
         self.done = self.ctx.Event()
         self.process = self.ctx.Process(target=self.process_loop, args=())
         self.start_time = 0.0
         self.request_id = ""
+
+        # Using underscored names to emphasize state used only from the child process.
+        self._last_params = BaseParams()
 
     def is_alive(self):
         return self.process.is_alive()
 
     async def stop(self):
         self.done.set()
-
 
         is_terminating = False
         if not self.is_alive():
@@ -71,8 +75,13 @@ class PipelineProcess:
                 is_terminating = False
 
         logging.info("Closing process queues")
-        for q in [self.input_queue, self.output_queue, self.param_update_queue,
-                  self.error_queue, self.log_queue]:
+        for q in [
+            self.input_queue,
+            self.output_queue,
+            self.param_update_queue,
+            self.error_queue,
+            self.log_queue,
+        ]:
             q.cancel_join_thread()
             q.close()
 
@@ -80,7 +89,9 @@ class PipelineProcess:
             logging.error("Failed to terminate process, killing")
             self.process.kill()
             if not await self._wait_stop(3):
-                logging.error(f"Failed to kill process self_pid={os.getpid()} child_pid={self.process.pid} is_alive={self.process.is_alive()}")
+                logging.error(
+                    f"Failed to kill process self_pid={os.getpid()} child_pid={self.process.pid} is_alive={self.process.is_alive()}"
+                )
                 raise RuntimeError("Failed to kill process")
 
         logging.info("Pipeline process cleanup complete")
@@ -111,6 +122,10 @@ class PipelineProcess:
         with self.pipeline_ready_time.get_lock():
             return (True, self.pipeline_ready_time.value)
 
+    def _is_loading(self) -> bool:
+        is_ready, _ = self.is_pipeline_ready()
+        return not is_ready
+
     def _set_pipeline_ready(self, ready: bool):
         if not ready:
             self.pipeline_ready.clear()
@@ -130,7 +145,13 @@ class PipelineProcess:
         clear_queue(self.param_update_queue)
         clear_queue(self.error_queue)
         clear_queue(self.log_queue)
-        self.param_update_queue.put({"request_id": request_id, "manifest_id": manifest_id, "stream_id": stream_id})
+        self.param_update_queue.put(
+            {
+                "request_id": request_id,
+                "manifest_id": manifest_id,
+                "stream_id": stream_id,
+            }
+        )
 
     # TODO: Once audio is implemented, combined send_input with input_loop
     # We don't need additional queueing as comfystream already maintains a queue
@@ -184,11 +205,11 @@ class PipelineProcess:
 
     def _handle_logging_params(self, params: dict) -> bool:
         if isinstance(params, dict) and "request_id" in params and "manifest_id" in params and "stream_id" in params:
-            logging.info(f"PipelineProcess: Resetting logging fields with request_id={params['request_id']}, manifest_id={params['manifest_id']} stream_id={params['stream_id']}")
-            self.request_id = params["request_id"]
-            self._reset_logging_fields(
-                params["request_id"], params["manifest_id"], params["stream_id"]
+            logging.info(
+                f"PipelineProcess: Resetting logging fields with request_id={params['request_id']}, manifest_id={params['manifest_id']} stream_id={params['stream_id']}"
             )
+            self.request_id = params["request_id"]
+            self._reset_logging_fields(params["request_id"], params["manifest_id"], params["stream_id"])
             return True
         return False
 
@@ -202,6 +223,7 @@ class PipelineProcess:
                 params = {}
 
             with log_timing(f"PipelineProcess: Pipeline loading with {params}"):
+                self._last_params = BaseParams(**params)
                 pipeline = load_pipeline(self.pipeline_name)
                 await pipeline.initialize(**params)
                 return pipeline
@@ -214,6 +236,7 @@ class PipelineProcess:
                 with log_timing(
                     f"PipelineProcess: Pipeline loading with default params due to error with params: {params}"
                 ):
+                    self._last_params = BaseParams()
                     pipeline = load_pipeline(self.pipeline_name)
                     await pipeline.initialize()
                     return pipeline
@@ -222,9 +245,10 @@ class PipelineProcess:
                 raise
 
     async def _run_pipeline_loops(self):
+        overlay = LoadingOverlayRenderer()
         pipeline = await self._initialize_pipeline()
-        input_task = asyncio.create_task(self._input_loop(pipeline))
-        output_task = asyncio.create_task(self._output_loop(pipeline))
+        input_task = asyncio.create_task(self._input_loop(pipeline, overlay))
+        output_task = asyncio.create_task(self._output_loop(pipeline, overlay))
         param_task = asyncio.create_task(self._param_update_loop(pipeline))
         self._set_pipeline_ready(True)
 
@@ -242,33 +266,61 @@ class PipelineProcess:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self._cleanup_pipeline(pipeline)
+            await self._cleanup_pipeline(pipeline, overlay)
 
         logging.info("PipelineProcess: _run_pipeline_loops finished.")
 
-    async def _input_loop(self, pipeline: Pipeline):
+    async def _input_loop(self, pipeline: Pipeline, overlay: LoadingOverlayRenderer):
         while not self.is_done():
             try:
-                input_frame = await asyncio.to_thread(self.input_queue.get, timeout=0.1)
-                if isinstance(input_frame, VideoFrame):
-                    input_frame.log_timestamps["pre_process_frame"] = time.time()
-                    await pipeline.put_video_frame(input_frame, self.request_id)
-                elif isinstance(input_frame, AudioFrame):
-                    self._try_queue_put(self.output_queue, AudioOutput([input_frame], self.request_id))
+                input = await asyncio.to_thread(self.input_queue.get, timeout=0.1)
+                if isinstance(input, VideoFrame):
+                    input.log_timestamps["pre_process_frame"] = time.time()
+
+                    if self._is_loading() and self._last_params.show_reloading_frame:
+                        await self._render_loading_frame(overlay, input)
+                    else:
+                        await pipeline.put_video_frame(input, self.request_id)
+                elif isinstance(input, AudioFrame):
+                    self._try_queue_put(self.output_queue, AudioOutput([input], self.request_id))
             except queue.Empty:
                 # Timeout ensures the non-daemon threads from to_thread can exit if task is cancelled
                 continue
             except Exception as e:
                 self._report_error("Error processing input frame", e)
 
-    async def _output_loop(self, pipeline: Pipeline):
+    async def _render_loading_frame(self, overlay: LoadingOverlayRenderer, input: VideoFrame):
+        if not overlay.is_active():
+            overlay.begin_reload()
+
+        w, h = self._last_params.width, self._last_params.height
+        loading_tensor = await overlay.render(w, h)
+        if torch.cuda.is_available() and not loading_tensor.is_cuda:
+            loading_tensor = loading_tensor.cuda()
+
+        out_frame = input.replace_tensor(loading_tensor)
+        out = VideoOutput(out_frame, self.request_id, is_loading_frame=True)
+
+        out.log_timestamps["post_process_frame"] = time.time()
+        self._try_queue_put(self.output_queue, out)
+
+    async def _output_loop(self, pipeline: Pipeline, overlay: LoadingOverlayRenderer):
         while not self.is_done():
             try:
-                output = await pipeline.get_processed_video_frame()
-                if isinstance(output, VideoOutput) and not output.tensor.is_cuda and torch.cuda.is_available():
-                    output = output.replace_tensor(output.tensor.cuda())
-                output.log_timestamps["post_process_frame"] = time.time()
-                self._try_queue_put(self.output_queue, output)
+                out = await pipeline.get_processed_video_frame()
+                overlay.update_last_frame(out.tensor)
+
+                if overlay.is_active():
+                    if self._is_loading():
+                        # Ignore frames that may come after the loading started to avoid thrashing the loading overlay.
+                        continue
+                    overlay.end_reload()
+
+                if isinstance(out, VideoOutput) and not out.tensor.is_cuda and torch.cuda.is_available():
+                    out = out.replace_tensor(out.tensor.cuda())
+
+                out.log_timestamps["post_process_frame"] = time.time()
+                self._try_queue_put(self.output_queue, out)
             except Exception as e:
                 self._report_error("Error processing output frame", e)
 
@@ -280,10 +332,15 @@ class PipelineProcess:
                 if params is None:
                     continue
 
-                params_hash = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()
-                logging.info(f"PipelineProcess: Updating pipeline parameters: hash={params_hash} params={params}")
+                params_hash = hashlib.md5(
+                    json.dumps(params, sort_keys=True).encode()
+                ).hexdigest()
+                logging.info(
+                    f"PipelineProcess: Updating pipeline parameters: hash={params_hash} params={params}"
+                )
 
                 with log_timing(f"PipelineProcess: Pipeline update parameters with params_hash={params_hash}"):
+                    self._last_params = BaseParams(**params)
                     reload_task = await pipeline.update_params(**params)
             except Exception as e:
                 self._report_error("Error updating params", e)
@@ -293,14 +350,14 @@ class PipelineProcess:
                 continue
 
             try:
-                with log_timing(f"PipelineProcess: Reloading pipeline"):
+                with log_timing("PipelineProcess: Reloading pipeline"):
                     self._set_pipeline_ready(False)
                     await reload_task
                     self._set_pipeline_ready(True)
             except Exception as e:
                 self._report_error("Error reloading pipeline", e)
                 self.done.set()
-                os._exit(1) # shutdown the sub-process altogether
+                os._exit(1)  # shutdown the sub-process altogether
 
     async def _get_latest_params(self, timeout: float) -> dict | None:
         """
@@ -310,7 +367,9 @@ class PipelineProcess:
         """
 
         try:
-            params = await asyncio.to_thread(self.param_update_queue.get, timeout=timeout)
+            params = await asyncio.to_thread(
+                self.param_update_queue.get, timeout=timeout
+            )
         except queue.Empty:
             return None
 
@@ -328,17 +387,18 @@ class PipelineProcess:
 
         return params
 
-    def _report_error(self, msg: str, error: Exception | None = None, silent = False):
+    def _report_error(self, msg: str, error: Exception | None = None, silent=False):
         if not silent:
             logging.error(msg, exc_info=error)
 
         error_event = {
             "message": f"{msg}: {error}" if error else msg,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
         self._try_queue_put(self.error_queue, error_event)
 
-    async def _cleanup_pipeline(self, pipeline):
+    async def _cleanup_pipeline(self, pipeline: Pipeline, overlay: LoadingOverlayRenderer):
+        overlay.end_reload()
         if pipeline is not None:
             try:
                 await pipeline.stop()
@@ -361,7 +421,9 @@ class PipelineProcess:
         sys.stderr = QueueTeeStream(sys.stderr, self)
 
     def _reset_logging_fields(self, request_id: str, manifest_id: str, stream_id: str):
-        config_logging(request_id=request_id, manifest_id=manifest_id, stream_id=stream_id)
+        config_logging(
+            request_id=request_id, manifest_id=manifest_id, stream_id=stream_id
+        )
         config_logging_fields(self.queue_handler, request_id, manifest_id, stream_id)
 
     def _try_queue_put(self, _queue: mp.Queue, item: Any):
@@ -381,8 +443,10 @@ class PipelineProcess:
                 break
         return (last_error["message"], last_error["timestamp"]) if last_error else None
 
+
 class QueueTeeStream:
     """Tee all stream (stdout or stderr) messages to the process log queue"""
+
     def __init__(self, original_stream, process: PipelineProcess):
         self.original_stream = original_stream
         self.process = process
@@ -399,8 +463,10 @@ class QueueTeeStream:
     def isatty(self):
         return self.original_stream.isatty()
 
+
 class LogQueueHandler(logging.Handler):
     """Send all log records to the process's log queue"""
+
     def __init__(self, process: PipelineProcess):
         super().__init__()
         self.process = process
@@ -414,6 +480,7 @@ class LogQueueHandler(logging.Handler):
         except Exception as e:
             logging.error(f"Error reporting error: {e}")
 
+
 # Function to clear the queue
 def clear_queue(queue):
     while not queue.empty():
@@ -421,6 +488,7 @@ def clear_queue(queue):
             queue.get_nowait()  # Remove items without blocking
         except Exception as e:
             logging.error(f"Error while clearing queue: {e}")
+
 
 def _setup_signal_handlers(
     done: mp.Event,

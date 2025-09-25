@@ -17,7 +17,6 @@ class LoadingOverlayRenderer:
         # Session tracking to invalidate caches when reload sessions change
         self._session_wallclock: float = 0.0
         self._active: bool = False
-        self._show_overlay: bool = True
 
         # Cached size and base images
         self._cached_size: Tuple[int, int] = (0, 0)
@@ -382,7 +381,7 @@ class LoadingOverlayRenderer:
 
     # Removed composite-per-index helpers; using fast torch ROI blend instead
 
-    def render(self, width: int, height: int) -> torch.Tensor:
+    def render_sync(self, width: int, height: int) -> torch.Tensor:
         w = int(width)
         h = int(height)
 
@@ -470,16 +469,11 @@ class LoadingOverlayRenderer:
         self.reset_session(0.0)
 
     def is_active(self) -> bool:
-        return self._active and self._show_overlay
+        return self._active
 
-    def set_show_overlay(self, show_overlay: bool) -> None:
-        self._show_overlay = bool(show_overlay)
-
-    async def render_if_active(self, width: int, height: int):
-        if not self.is_active():
-            return None
+    async def render(self, width: int, height: int):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self.render, width, height)
+        return await loop.run_in_executor(self._executor, self.render_sync, width, height)
 
     async def prewarm(self, width: int, height: int) -> None:
         """
