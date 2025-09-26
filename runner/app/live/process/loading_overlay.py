@@ -389,10 +389,10 @@ class LoadingOverlayRenderer:
         self._ensure_base_images(w, h)
         self._ensure_text(w, h)
         self._ensure_background_rgba(w, h)
-        # Determine spinner index for this frame (build spinner frames in the background if missing)
+        # Determine spinner index for this frame (build spinner frames synchronously if missing)
         if not self._spinner_frames:
-            self._ensure_spinner_frames_async(w, h)
-        angle = (time.time() * 180.0) % 360.0
+            self._ensure_spinner_frames(w, h)
+        angle = (-time.time() * 180.0) % 360.0
         k = int((angle / 360.0) * self._spinner_num_frames) % self._spinner_num_frames
         # Compute spinner ROI if unknown
         if self._spinner_frames:
@@ -478,9 +478,14 @@ class LoadingOverlayRenderer:
     async def prewarm(self, width: int, height: int) -> None:
         """
         Precompute spinner/text resources off the main thread to avoid first-frame stutters.
+        Only prewarms if the resolution has changed.
         """
         w = int(width)
         h = int(height)
+
+        # Only prewarm if resolution changed
+        if self._cached_size == (w, h):
+            return
 
         def _prewarm_sync() -> None:
             try:
